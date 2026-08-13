@@ -5,9 +5,167 @@
 #include <dirent.h>
 #include <sys/stat.h>
 
-#include "find.h"
+#include "str.h"
 
-int help(int code, const char* args) {
+typedef enum {
+    STATE_TYPE,
+    STATE_PATHS,
+    STATE_WHERE,
+    STATE_CONDITION,
+    STATE_ACTION,
+    STATE_DONE,
+    STATE_ERROR
+} ParserState;
+
+typedef enum {
+    TYPE_FILES,
+    TYPE_FOLDERS,
+} EntryType;
+
+typedef enum {
+    CONDITION_NONE,
+    CONDITION_CONTAINS,
+    CONDITION_STARTSWITH,
+    CONDITION_ENDSWITH
+} ConditionType;
+
+typedef enum {
+    ACTION_PRINT,
+    ACTION_MOVE,
+    ACTION_DELETE,
+    ACTION_COPY,
+    ACTION_COMMAND
+} ActionType;
+
+typedef struct {
+    char** items;
+    size_t count;
+    size_t capacity;
+} StringArray;
+
+typedef struct {
+    EntryType type;
+    StringArray paths;
+    ConditionType condition;
+    char* value;
+    ActionType action;
+    char* action_arg;
+} FindCommand;
+
+void AddString(StringArray* array, const char* string);
+void FreeList(StringArray* array);
+
+StringArray search(FindCommand* command);
+void search_recursive(int i, FindCommand* command, StringArray* results);
+
+void AddString(StringArray* array, const char* string) {
+
+    if (array->count == array->capacity) {
+        size_t new_capacity = array->capacity == 0
+            ? 16
+            : array->capacity * 2;
+
+        char** new_items = realloc(
+            array->items,
+            new_capacity * sizeof(char*)
+        );
+
+        if (!new_items) {
+            puts("Error: Could not expand StringArray!");
+            exit(EXIT_FAILURE);
+        }
+
+        array->items = new_items;
+        array->capacity = new_capacity;
+    }
+
+    array->items[array->count] = strdup(string);
+
+    if (!array->items[array->count]) {
+        puts("Error: Could not duplicate input string!");
+        exit(EXIT_FAILURE);
+    }
+
+    array->count++;
+}
+
+void FreeList(StringArray* array) {
+    for (size_t i = 0; i < array->count; i++)
+        free(array->items[i]);
+
+    free(array->items);
+
+    array->items = NULL;
+    array->count = 0;
+    array->capacity = 0;
+}
+
+StringArray search(FindCommand* command) {
+    // Create result array
+    StringArray results = {
+        .items = NULL,
+        .count = 0,
+        .capacity = 0
+    };
+
+    // Start recursive search.
+    // If type == files, want_type = 1,
+    // else for folders, want_type = 0.
+    for (int i = 0; i < command->paths.count; i++)
+        search_recursive(i, command, &results);
+
+    return results;
+}
+
+void search_recursive(int i, FindCommand* command, StringArray* results) {
+    const char* path = command->paths.items[i];
+    DIR* dir = opendir(path);
+    if (!dir)
+        return;
+
+    struct dirent* entry;
+
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+            continue;
+
+        char fullpath[4096];
+
+        snprintf(
+            fullpath,
+            sizeof(fullpath),
+            "%s/%s",
+            path,
+            entry->d_name
+        );
+
+        struct stat st;
+
+        if (lstat(fullpath, &st) != 0)
+            continue;
+
+        bool condition_met = false;
+
+        if (
+            (command->condition == CONDITION_CONTAINS && strstr(entry->d_name, command->value) != NULL) ||
+            (command->condition == CONDITION_STARTSWITH && startswith(entry->d_name, command->value)) ||
+            (command->condition == CONDITION_ENDSWITH && endswith(entry->d_name, command->value))
+        ) {
+            if (command->type == TYPE_FILES && S_ISREG(st.st_mode))
+                AddString(results, fullpath);
+            else if (command->type == TYPE_FOLDERS && S_ISDIR(st.st_mode))
+                AddString(results, fullpath);
+        }
+
+
+        if (S_ISDIR(st.st_mode))
+            AddString(&command->paths, fullpath);
+    }
+
+    closedir(dir);
+}
+
+int help(int code) {
     switch (code) {
         case 0:
             puts(
@@ -20,28 +178,27 @@ int help(int code, const char* args) {
             );
             return EXIT_SUCCESS;
         case 1:
-            printf("find expects [type] of \"files\" or \"folders\". Received \"%s\" ", args);
+            puts("find [type]: [type] must be \"files\" or \"folders\".");
             return EXIT_FAILURE;
         case 2:
-            puts("find expects a path after \"in\".");
+            puts("find [type] in [path]: expects a path after \"in\".");
             return EXIT_FAILURE;
         case 3:
-            puts("Incomplete Condition.");
+            puts("find [type] where [condition]: Incomplete Condition.");
+            return EXIT_FAILURE;
+        case 4:
+            puts("find [type] where [condition]: Unknown Condition");
             return EXIT_FAILURE;
         default:
             return EXIT_FAILURE;
     }
 }
 
-bool str_equals(const char* str1, const char* str2) {
-    return strcmp(str1, str2) == 0;
-}
-
 int main(int argc, char* argv[]) {
 
     /* If only binary name passed, display help. */
     if (argc == 1)
-        return help(0, NULL);
+        return help(0);
 
     int i = 1;
     FindCommand command = {0};
@@ -55,18 +212,27 @@ int main(int argc, char* argv[]) {
                 else if (str_equals(argv[i], "folders"))
                     command.type = TYPE_FOLDERS;
                 else
-                    return help(1, argv[i]);
+                    return help(1);
 
-                i++;
-
-                if (i >= argc) {
+                // Increment i to check the next word: find [type] ____
+                if (++i >= argc) {
                     AddString(&command.paths, ".");
                     command.action = ACTION_PRINT;
                     state = STATE_DONE;
                 }
-                else {
+                else if (str_equals(argv[i], "in")) {
                     i++;
                     state = STATE_PATHS;
+                }
+                else if (str_equals(argv[i], "where")) {
+                    state = STATE_CONDITION;
+                }
+                else if (str_equals(argv[i], "then")) {
+                    i++;
+                    state = STATE_ACTION;
+                }
+                else {
+                    return help(0);
                 }
 
                 break;
@@ -78,18 +244,16 @@ int main(int argc, char* argv[]) {
                         continue;
                     }
 
-                    AddString(&command.paths, argv[i]);
-                    i++;
+                    AddString(&command.paths, argv[i++]);
                 }
 
                 if (command.paths.count == 0)
-                    return help(2, NULL);
+                    return help(2);
                 else if (i >= argc) {
                     command.action = ACTION_PRINT;
                     state = STATE_DONE;
                 }
                 else if (str_equals(argv[i], "where")) {
-                    i++;
                     state = STATE_CONDITION;
                 }
                 else if (str_equals(argv[i], "then")) {
@@ -100,46 +264,28 @@ int main(int argc, char* argv[]) {
                 break;
             case STATE_CONDITION:
 
-                if (i >= argc || str_equals(argv[i], "name"))
-                    return help(3, NULL);
+                if (++i >= argc || !(str_equals(argv[i], "name") || str_equals(argv[i], "size")))
+                    return help(3);
 
-                i++;
-
-                if (i >= argc) {
-                    fprintf(stderr, "Expected condition operator.\n");
-                    state = STATE_ERROR;
-                    break;
-                }
-
-                if (strcmp(argv[i], "contains") == 0)
+                if (++i >= argc)
+                    return help(3);
+                else if (str_equals(argv[i], "contains"))
                     command.condition = CONDITION_CONTAINS;
-                else if (strcmp(argv[i], "endswith") == 0)
+                else if (str_equals(argv[i], "endswith"))
                     command.condition = CONDITION_ENDSWITH;
-                else {
-                    fprintf(
-                        stderr,
-                        "Unknown condition: %s\n",
-                        argv[i]
-                    );
+                else if (str_equals(argv[i], "startswith"))
+                    command.condition = CONDITION_STARTSWITH;
+                else
+                    return help(4);
 
-                    state = STATE_ERROR;
-                    break;
-                }
-
-                i++;
-
-                if (i >= argc) {
-                    fprintf(stderr, "Expected condition value.\n");
-                    state = STATE_ERROR;
-                    break;
-                }
+                if (++i >= argc)
+                    return help(3);
 
                 command.value = argv[i];
-                i++;
 
-                if (i >= argc)
+                if (++i >= argc)
                     state = STATE_DONE;
-                else if (strcmp(argv[i], "then") == 0) {
+                else if (str_equals(argv[i], "then")) {
                     i++;
                     state = STATE_ACTION;
                 }
