@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 
 #include "str.h"
+#include "bytes.h"
 
 typedef enum {
     STATE_TYPE,
@@ -26,7 +27,10 @@ typedef enum {
     CONDITION_NONE,
     CONDITION_CONTAINS,
     CONDITION_STARTSWITH,
-    CONDITION_ENDSWITH
+    CONDITION_ENDSWITH,
+    CONDITION_LESSTHAN,
+    CONDITION_GREATERTHAN,
+    CONDITION_EXECUTABLE
 } ConditionType;
 
 typedef enum {
@@ -126,7 +130,7 @@ void search_recursive(int i, FindCommand* command, StringArray* results) {
     struct dirent* entry;
 
     while ((entry = readdir(dir)) != NULL) {
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+        if (str_equals(entry->d_name, ".") || str_equals(entry->d_name, ".."))
             continue;
 
         char fullpath[4096];
@@ -147,6 +151,7 @@ void search_recursive(int i, FindCommand* command, StringArray* results) {
         bool condition_met = false;
 
         if (
+            (command->condition == CONDITION_NONE) ||
             (command->condition == CONDITION_CONTAINS && strstr(entry->d_name, command->value) != NULL) ||
             (command->condition == CONDITION_STARTSWITH && startswith(entry->d_name, command->value)) ||
             (command->condition == CONDITION_ENDSWITH && endswith(entry->d_name, command->value))
@@ -156,7 +161,6 @@ void search_recursive(int i, FindCommand* command, StringArray* results) {
             else if (command->type == TYPE_FOLDERS && S_ISDIR(st.st_mode))
                 AddString(results, fullpath);
         }
-
 
         if (S_ISDIR(st.st_mode))
             AddString(&command->paths, fullpath);
@@ -218,25 +222,21 @@ int main(int argc, char* argv[]) {
                 if (++i >= argc) {
                     AddString(&command.paths, ".");
                     command.action = ACTION_PRINT;
+                    command.condition = CONDITION_NONE;
                     state = STATE_DONE;
                 }
-                else if (str_equals(argv[i], "in")) {
-                    i++;
+                else if (str_equals(argv[i], "in"))
                     state = STATE_PATHS;
-                }
-                else if (str_equals(argv[i], "where")) {
+                else if (str_equals(argv[i], "where"))
                     state = STATE_CONDITION;
-                }
-                else if (str_equals(argv[i], "then")) {
-                    i++;
+                else if (str_equals(argv[i], "then"))
                     state = STATE_ACTION;
-                }
-                else {
+                else
                     return help(0);
-                }
 
                 break;
             case STATE_PATHS:
+                i++;
                 while (i < argc && !str_equals(argv[i], "where") && !str_equals(argv[i], "then")) {
 
                     if (str_equals(argv[i], "and")) {
@@ -251,32 +251,41 @@ int main(int argc, char* argv[]) {
                     return help(2);
                 else if (i >= argc) {
                     command.action = ACTION_PRINT;
+                    command.condition = CONDITION_NONE;
                     state = STATE_DONE;
                 }
-                else if (str_equals(argv[i], "where")) {
+                else if (str_equals(argv[i], "where"))
                     state = STATE_CONDITION;
-                }
-                else if (str_equals(argv[i], "then")) {
-                    i++;
+                else if (str_equals(argv[i], "then"))
                     state = STATE_ACTION;
-                }
 
                 break;
             case STATE_CONDITION:
 
-                if (++i >= argc || !(str_equals(argv[i], "name") || str_equals(argv[i], "size")))
-                    return help(3);
-
                 if (++i >= argc)
                     return help(3);
-                else if (str_equals(argv[i], "contains"))
-                    command.condition = CONDITION_CONTAINS;
-                else if (str_equals(argv[i], "endswith"))
-                    command.condition = CONDITION_ENDSWITH;
-                else if (str_equals(argv[i], "startswith"))
-                    command.condition = CONDITION_STARTSWITH;
-                else
-                    return help(4);
+                else if (str_equals(argv[i], "name")) {
+                    if (++i >= argc)
+                        return help(3);
+                    else if (str_equals(argv[i], "contains"))
+                        command.condition = CONDITION_CONTAINS;
+                    else if (str_equals(argv[i], "endswith"))
+                        command.condition = CONDITION_ENDSWITH;
+                    else if (str_equals(argv[i], "startswith"))
+                        command.condition = CONDITION_STARTSWITH;
+                    else
+                        return help(4);
+                }
+                else if (str_equals(argv[i], "size")) {
+                    if (++i >= argc)
+                        return help(3);
+                    else if (str_equals(argv[i], "lessthan"))
+                        command.condition = CONDITION_LESSTHAN;
+                    else if (str_equals(argv[i], "greaterthan"))
+                        command.condition = CONDITION_GREATERTHAN;
+                    else
+                        return help(4);
+                }
 
                 if (++i >= argc)
                     return help(3);
@@ -285,38 +294,28 @@ int main(int argc, char* argv[]) {
 
                 if (++i >= argc)
                     state = STATE_DONE;
-                else if (str_equals(argv[i], "then")) {
-                    i++;
+                else if (str_equals(argv[i], "then"))
                     state = STATE_ACTION;
-                }
                 else {
-                    fprintf(
-                        stderr,
-                        "Expected \"then\" or end of command.\n"
-                    );
-
+                    fprintf(stderr, "Expected \"then\" or end of command.\n");
                     state = STATE_ERROR;
                 }
 
                 break;
             case STATE_ACTION:
-                if (i >= argc || strcmp(argv[i], "move") != 0) {
+                if (++i >= argc || strcmp(argv[i], "move") != 0) {
                     fprintf(stderr, "Expected action.\n");
                     state = STATE_ERROR;
                     break;
                 }
 
-                i++;
-
-                if (i >= argc || strcmp(argv[i], "to") != 0) {
+                if (++i >= argc || strcmp(argv[i], "to") != 0) {
                     fprintf(stderr, "Expected \"to\" after \"move\".\n");
                     state = STATE_ERROR;
                     break;
                 }
 
-                i++;
-
-                if (i >= argc) {
+                if (++i >= argc) {
                     fprintf(stderr, "Expected destination path.\n");
                     state = STATE_ERROR;
                     break;
@@ -325,9 +324,7 @@ int main(int argc, char* argv[]) {
                 //command.has_action = true;
                 //command.action = argv[i];
 
-                i++;
-
-                if (i != argc) {
+                if (++i != argc) {
                     fprintf(stderr,
                         "Unexpected argument after action: %s\n",
                         argv[i]
@@ -352,6 +349,5 @@ int main(int argc, char* argv[]) {
             printf("%s\n", results.items[j]);
 
     FreeList(&results);
-
     return EXIT_SUCCESS;
 }
