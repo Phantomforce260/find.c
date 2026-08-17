@@ -1,10 +1,12 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <sys/stat.h>
 #include <dirent.h>
 #include <string.h>
 #include <linux/limits.h>
 #include <ctype.h>
+#include <unistd.h>
 
 static inline long long byte_count(const char* path) {
     struct stat st;
@@ -24,8 +26,7 @@ static inline long long byte_count(const char* path) {
         struct dirent* entry;
 
         while ((entry = readdir(dir)) != NULL) {
-            if (strcmp(entry->d_name, ".") == 0 ||
-                strcmp(entry->d_name, "..") == 0)
+            if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
                 continue;
 
             char child_path[PATH_MAX];
@@ -81,7 +82,9 @@ static inline long long parse_bytes(const char* str) {
     if (*end != '\0')
         return -1;
 
-    if (strcmp(unit, "kb") == 0)
+    if (strcmp(unit, "b") == 0)
+        multiplier = 1;
+    else if (strcmp(unit, "kb") == 0)
         multiplier = 1024LL;
     else if (strcmp(unit, "mb") == 0)
         multiplier = 1024LL * 1024;
@@ -95,4 +98,26 @@ static inline long long parse_bytes(const char* str) {
         return -1;  // Unknown unit
 
     return (long long)(value * multiplier);
+}
+
+static inline bool is_executable(const char* path) {
+    return access(path, X_OK) == 0;
+}
+
+static inline bool has_permission(const char* path, char* permissions) {
+    struct stat st;
+    char* end;
+    long mode;
+
+    mode = strtol(permissions, &end, 8);
+
+    if (*permissions == '\0' || *end != '\0' || mode < 0 || mode > 0777) {
+        return false;
+    }
+
+    if (stat(path, &st) != 0) {
+        return false;
+    }
+
+    return (st.st_mode & 0777) == (mode & 0777);
 }
