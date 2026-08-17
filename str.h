@@ -1,5 +1,7 @@
 #include <string.h>
 #include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 static inline bool str_equals(const char* str1, const char* str2) {
     return strcmp(str1, str2) == 0;
