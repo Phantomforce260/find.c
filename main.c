@@ -379,19 +379,27 @@ int main(int argc, char* argv[]) {
                     }
                     else if (str_equals(argv[i], "in"))
                         state = STATE_PATHS;
-                    else if (str_equals(argv[i], "where"))
+                    else if (str_equals(argv[i], "where")) {
+                        AddString(&command.paths, ".");
                         state = STATE_CONDITION;
-                    else if (str_equals(argv[i], "then"))
+                    }
+                    else if (str_equals(argv[i], "then")) {
+                        AddString(&command.paths, ".");
                         state = STATE_ACTION;
+                    }
                     else
                         return help(0);
                 }
                 else if (str_equals(argv[i], "in"))
                     state = STATE_PATHS;
-                else if (str_equals(argv[i], "where"))
+                else if (str_equals(argv[i], "where")) {
+                    AddString(&command.paths, ".");
                     state = STATE_CONDITION;
-                else if (str_equals(argv[i], "then"))
+                }
+                else if (str_equals(argv[i], "then")) {
+                    AddString(&command.paths, ".");
                     state = STATE_ACTION;
+                }
                 else
                     return help(0);
 
