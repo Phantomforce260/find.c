@@ -1,3 +1,7 @@
+// ================================================================================================
+// Headers
+// ================================================================================================
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -5,12 +9,54 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <linux/limits.h>
+#include <ctype.h>
 #include <unistd.h>
 
-#include "str.h"
-#include "arr.h"
-#include "bytes.h"
-#include "files.h"
+// ================================================================================================
+// Enums
+// ================================================================================================
+
+typedef enum {
+    TYPE_FILES,
+    TYPE_FOLDERS,
+} EntryType;
+
+typedef enum {
+    CONDITION_NONE,
+    CONDITION_NAME_CONTAINS,
+    CONDITION_FILE_CONTAINS,
+    CONDITION_FOLDER_CONTAINS,
+
+    CONDITION_STARTSWITH,
+    CONDITION_ENDSWITH,
+    CONDITION_LESSTHAN,
+    CONDITION_GREATERTHAN,
+    CONDITION_EXECUTABLE,
+    CONDITION_PERM_BITS
+} ConditionType;
+
+typedef enum {
+    CMP_EQ,
+    CMP_GT,
+    CMP_GTE,
+    CMP_LT,
+    CMP_LTE,
+} CompareOp;
+
+typedef enum {
+    COUNT_ITEMS,
+    COUNT_FILES,
+    COUNT_FOLDERS,
+} CountWhat;
+
+typedef enum {
+    ACTION_PRINT,
+    ACTION_MOVE,
+    ACTION_DELETE,
+    ACTION_COPY,
+    ACTION_COMMAND
+} ActionType;
 
 typedef enum {
     STATE_TYPE,
@@ -22,6 +68,32 @@ typedef enum {
     STATE_ERROR
 } ParserState;
 
+// ================================================================================================
+// Structs
+// ================================================================================================
+
+typedef struct {
+    char** items;
+    size_t count;
+    size_t capacity;
+} StringArray;
+
+typedef struct {
+    ConditionType type;
+    char* value;
+    bool negated;
+    CompareOp compare_op;
+    long count_target;
+    CountWhat count_what;
+    bool count_shallow;
+} Condition;
+
+typedef struct {
+    Condition* items;
+    size_t count;
+    size_t capacity;
+} ConditionArray;
+
 typedef struct {
     EntryType type;
     StringArray paths;
@@ -32,11 +104,301 @@ typedef struct {
     bool recursive;
 } FindCommand;
 
+// ================================================================================================
+// Function Headers
+// ================================================================================================
+
 StringArray search(FindCommand* command);
 
 static bool path_covered(StringArray* paths, const char* path);
 static void search_recursive(const char* path, FindCommand* command, StringArray* results);
 static int exec_action(FindCommand* command, StringArray* results);
+
+// ================================================================================================
+// String Helpers
+// ================================================================================================
+
+static bool str_equals(const char* str1, const char* str2) {
+    return strcmp(str1, str2) == 0;
+}
+
+static bool startswith(const char *str, const char *prefix) {
+    return strncmp(str, prefix, strlen(prefix)) == 0;
+}
+
+static bool endswith(const char *str, const char *suffix) {
+    size_t str_len = strlen(str);
+    size_t suffix_len = strlen(suffix);
+
+    if (suffix_len > str_len)
+        return false;
+
+    return strcmp(str + str_len - suffix_len, suffix) == 0;
+}
+
+// ================================================================================================
+// Array Helpers
+// ================================================================================================
+
+void AddString(StringArray* array, const char* string) {
+
+    if (array->count == array->capacity) {
+        size_t new_capacity = array->capacity == 0
+            ? 16
+            : array->capacity * 2;
+
+        char** new_items = realloc(
+            array->items,
+            new_capacity * sizeof(char*)
+        );
+
+        if (!new_items) {
+            puts("Error: Could not expand StringArray!");
+            exit(EXIT_FAILURE);
+        }
+
+        array->items = new_items;
+        array->capacity = new_capacity;
+    }
+
+    array->items[array->count] = strdup(string);
+
+    if (!array->items[array->count]) {
+        puts("Error: Could not duplicate input string!");
+        exit(EXIT_FAILURE);
+    }
+
+    array->count++;
+}
+
+void FreeList(StringArray* array) {
+    for (size_t i = 0; i < array->count; i++)
+        free(array->items[i]);
+
+    free(array->items);
+
+    array->items = NULL;
+    array->count = 0;
+    array->capacity = 0;
+}
+
+void AddCondition(ConditionArray* array, Condition cond) {
+    if (array->count == array->capacity) {
+        size_t new_capacity = array->capacity == 0
+            ? 16
+            : array->capacity * 2;
+
+        Condition* new_items = realloc(
+            array->items,
+            new_capacity * sizeof(Condition)
+        );
+
+        if (!new_items) {
+            puts("Error: Could not expand ConditionArray!");
+            exit(EXIT_FAILURE);
+        }
+
+        array->items = new_items;
+        array->capacity = new_capacity;
+    }
+
+    if (cond.value)
+        cond.value = strdup(cond.value);
+
+    array->items[array->count] = cond;
+    array->count++;
+}
+
+void FreeConditions(ConditionArray* array) {
+    for (size_t i = 0; i < array->count; i++)
+        free(array->items[i].value);
+
+    free(array->items);
+
+    array->items = NULL;
+    array->count = 0;
+    array->capacity = 0;
+}
+
+// ================================================================================================
+// I/O Operations
+// ================================================================================================
+
+static long long byte_count(const char* path) {
+    struct stat st;
+
+    if (stat(path, &st) != 0)
+        return -1;
+
+    if (S_ISREG(st.st_mode))
+        return (long long)st.st_size;
+
+    if (S_ISDIR(st.st_mode)) {
+        DIR* dir = opendir(path);
+        if (!dir)
+            return -1;
+
+        long long total = 0;
+        struct dirent* entry;
+
+        while ((entry = readdir(dir)) != NULL) {
+            if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+                continue;
+
+            char child_path[PATH_MAX];
+
+            snprintf(child_path, sizeof(child_path), "%s/%s", path, entry->d_name);
+
+            long long size = byte_count(child_path);
+
+            if (size < 0) {
+                closedir(dir);
+                return -1;
+            }
+
+            total += size;
+        }
+
+        closedir(dir);
+        return total;
+    }
+
+    // Unsupported type (e.g. symbolic link, device, socket)
+    return -1;
+}
+
+static long long parse_bytes(const char* str) {
+    char* end;
+    double value;
+    long long multiplier = 1;
+
+    // Parse numbers
+    value = strtod(str, &end);
+
+    // If number could not be found
+    if (end == str)
+        return -1;
+
+    // Skip whitespace between number and unit
+    while (isspace((unsigned char)* end))
+        end++;
+
+    char unit[3] = {0};
+    int i = 0;
+
+    while (*end && i < 2) {
+        unit[i++] = (char)tolower((unsigned char)* end);
+        end++;
+    }
+
+    // Make sure there is nothing after the unit
+    while (isspace((unsigned char)* end))
+        end++;
+
+    if (*end != '\0')
+        return -1;
+
+    if (strcmp(unit, "b") == 0)
+        multiplier = 1;
+    else if (strcmp(unit, "kb") == 0)
+        multiplier = 1024LL;
+    else if (strcmp(unit, "mb") == 0)
+        multiplier = 1024LL * 1024;
+    else if (strcmp(unit, "gb") == 0)
+        multiplier = 1024LL * 1024 * 1024;
+    else if (strcmp(unit, "tb") == 0)
+        multiplier = 1024LL * 1024 * 1024 * 1024;
+    else if (unit[0] == '\0')
+        multiplier = 1;
+    else
+        return -1;  // Unknown unit
+
+    return (long long)(value * multiplier);
+}
+
+static bool is_executable(const char* path) {
+    return access(path, X_OK) == 0;
+}
+
+static bool has_permission(const char* path, char* permissions) {
+    struct stat st;
+    char* end;
+    long mode = strtol(permissions, &end, 8);
+
+    if (*permissions == '\0' || *end != '\0' || mode < 0 || mode > 0777)
+        return false;
+
+    if (stat(path, &st) != 0)
+        return false;
+
+    return (st.st_mode & 0777) == (mode & 0777);
+}
+
+static const char* basename(const char* path) {
+    const char* last = strrchr(path, '/');
+    return last ? last + 1 : path;
+}
+
+static bool file_contains(const char* path, const char* needle) {
+    FILE* f = fopen(path, "rb");
+    if (!f)
+        return false;
+
+    fseek(f, 0, SEEK_END);
+    long file_size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    if (file_size < 0) {
+        fclose(f);
+        return false;
+    }
+
+    char* content = malloc(file_size + 1);
+    if (!content) {
+        fclose(f);
+        return false;
+    }
+
+    size_t n = fread(content, 1, file_size, f);
+    content[n] = '\0';
+
+    bool found = strstr(content, needle) != NULL;
+
+    free(content);
+    fclose(f);
+    return found;
+}
+
+static bool copy_file(const char* src, const char* dest) {
+    FILE* in = fopen(src, "rb");
+    if (!in)
+        return false;
+
+    FILE* out = fopen(dest, "wb");
+    if (!out) {
+        fclose(in);
+        return false;
+    }
+
+    char buf[8192];
+    size_t n;
+    bool ok = true;
+
+    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
+        if (fwrite(buf, 1, n, out) != n) {
+            ok = false;
+            break;
+        }
+    }
+
+    fclose(in);
+    fclose(out);
+    return ok;
+}
+
+// ================================================================================================
+// Search Logic
+// ================================================================================================
 
 StringArray search(FindCommand* command) {
     StringArray results = {
@@ -85,6 +447,65 @@ static bool path_covered(StringArray* paths, const char* path) {
     return false;
 }
 
+static long count_directory(const char* path, CountWhat what, bool shallow) {
+    DIR* dir = opendir(path);
+    if (!dir)
+        return 0;
+
+    long count = 0;
+    struct dirent* entry;
+
+    while ((entry = readdir(dir)) != NULL) {
+        if (str_equals(entry->d_name, ".") || str_equals(entry->d_name, ".."))
+            continue;
+
+        char fullpath[4096];
+        snprintf(fullpath, sizeof(fullpath), "%s/%s", path, entry->d_name);
+
+        struct stat st;
+        if (lstat(fullpath, &st) != 0)
+            continue;
+
+        bool match = false;
+        switch (what) {
+            case COUNT_ITEMS:
+                match = true;
+                break;
+            case COUNT_FILES:
+                match = S_ISREG(st.st_mode);
+                break;
+            case COUNT_FOLDERS:
+                match = S_ISDIR(st.st_mode);
+                break;
+        }
+
+        if (match)
+            count++;
+
+        if (!shallow && S_ISDIR(st.st_mode))
+            count += count_directory(fullpath, what, shallow);
+    }
+
+    closedir(dir);
+    return count;
+}
+
+static bool match_count(long actual, CompareOp op, long target) {
+    switch (op) {
+        case CMP_EQ:
+            return actual == target;
+        case CMP_GT:
+            return actual > target;
+        case CMP_GTE:
+            return actual >= target;
+        case CMP_LT:
+            return actual < target;
+        case CMP_LTE:
+            return actual <= target;
+    }
+    return false;
+}
+
 static void search_recursive(const char* path, FindCommand* command, StringArray* results) {
     DIR* dir = opendir(path);
     if (!dir)
@@ -97,11 +518,9 @@ static void search_recursive(const char* path, FindCommand* command, StringArray
             continue;
 
         char fullpath[4096];
-
         snprintf(fullpath, sizeof(fullpath), "%s/%s", path, entry->d_name);
 
         struct stat st;
-
         if (lstat(fullpath, &st) != 0)
             continue;
 
@@ -139,6 +558,12 @@ static void search_recursive(const char* path, FindCommand* command, StringArray
                 case CONDITION_FILE_CONTAINS:
                     met = file_contains(fullpath, cond.value);
                     break;
+                case CONDITION_FOLDER_CONTAINS:
+                    met = match_count(
+                        count_directory(fullpath, cond.count_what, cond.count_shallow),
+                        cond.compare_op,
+                        cond.count_target);
+                    break;
             }
 
             if (cond.negated)
@@ -170,6 +595,7 @@ static int exec_action(FindCommand* command, StringArray* results) {
     if (command->action == ACTION_PRINT || results->count == 0) {
         for (size_t j = 0; j < results->count; j++)
             printf("%s\n", results->items[j]);
+
         return EXIT_SUCCESS;
     }
 
@@ -265,6 +691,10 @@ static int exec_action(FindCommand* command, StringArray* results) {
 
     return EXIT_SUCCESS;
 }
+
+// ================================================================================================
+// Main Code
+// ================================================================================================
 
 int help(int code) {
     switch (code) {
@@ -481,10 +911,88 @@ int main(int argc, char* argv[]) {
                     else if (str_equals(argv[i], "contents")) {
                         if (++i >= argc)
                             return help(3);
-                        else if (str_equals(argv[i], "contains"))
-                            cond_type = CONDITION_FILE_CONTAINS;
-                        else
+                        else if (!str_equals(argv[i], "contains"))
                             return help(4);
+
+                        if (command.type == TYPE_FILES)
+                            cond_type = CONDITION_FILE_CONTAINS;
+                        else {
+                            cond_type = CONDITION_FOLDER_CONTAINS;
+
+                            if (++i >= argc)
+                                return help(3);
+
+                            CompareOp op = CMP_EQ;
+                            const char* tok = argv[i];
+
+                            if (str_equals(tok, ">") || str_equals(tok, ">=") ||
+                                str_equals(tok, "<") || str_equals(tok, "<=")) {
+                                if (str_equals(tok, ">"))  op = CMP_GT;
+                                if (str_equals(tok, ">=")) op = CMP_GTE;
+                                if (str_equals(tok, "<"))  op = CMP_LT;
+                                if (str_equals(tok, "<=")) op = CMP_LTE;
+                                if (++i >= argc)
+                                    return help(3);
+                                tok = argv[i];
+                            }
+                            else if (tok[0] == '>' || tok[0] == '<') {
+                                if (tok[1] == '=')
+                                    op = tok[0] == '>' ? CMP_GTE : CMP_LTE;
+                                else
+                                    op = tok[0] == '>' ? CMP_GT : CMP_LT;
+                                tok += (tok[1] == '=') ? 2 : 1;
+                            }
+
+                            char* end;
+                            long target = strtol(tok, &end, 10);
+                            if (end == tok || target < 0 || *end != '\0')
+                                return help(3);
+
+                            if (++i >= argc)
+                                return help(3);
+
+                            CountWhat what;
+                            if (str_equals(argv[i], "items"))
+                                what = COUNT_ITEMS;
+                            else if (str_equals(argv[i], "files"))
+                                what = COUNT_FILES;
+                            else if (str_equals(argv[i], "folders"))
+                                what = COUNT_FOLDERS;
+                            else
+                                return help(4);
+
+                            bool shallow = false;
+                            if (i + 1 < argc && str_equals(argv[i + 1], "shallow")) {
+                                shallow = true;
+                                i++;
+                            }
+
+                            cond_value = NULL;
+                            contains_keyword = false;
+
+                            AddCondition(&command.conditions, (Condition){
+                                .type = CONDITION_FOLDER_CONTAINS,
+                                .value = NULL,
+                                .negated = negated,
+                                .compare_op = op,
+                                .count_target = target,
+                                .count_what = what,
+                                .count_shallow = shallow,
+                            });
+
+                            if (++i >= argc) {
+                                state = STATE_DONE;
+                                break;
+                            }
+                            else if (str_equals(argv[i], "and"))
+                                continue;
+                            else if (str_equals(argv[i], "then")) {
+                                state = STATE_ACTION;
+                                break;
+                            }
+                            else
+                                return help(5);
+                        }
                     }
 
                     if (contains_keyword) {
@@ -494,7 +1002,11 @@ int main(int argc, char* argv[]) {
                             cond_value = argv[i];
                     }
 
-                    AddCondition(&command.conditions, cond_type, cond_value, negated);
+                    AddCondition(&command.conditions, (Condition){
+                        .type = cond_type,
+                        .value = (char*)cond_value,
+                        .negated = negated,
+                    });
 
                     if (++i >= argc) {
                         state = STATE_DONE;
