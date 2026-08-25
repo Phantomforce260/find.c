@@ -20,6 +20,7 @@
 typedef enum {
     TYPE_FILES,
     TYPE_FOLDERS,
+    TYPE_ITEMS
 } EntryType;
 
 typedef enum {
@@ -118,39 +119,34 @@ static int exec_action(FindCommand* command, StringArray* results);
 // String Helpers
 // ================================================================================================
 
-static bool str_equals(const char* str1, const char* str2) {
+// str_equals: returns true if str1 == str2.
+bool str_equals(const char* str1, const char* str2) {
     return strcmp(str1, str2) == 0;
 }
 
-static bool startswith(const char *str, const char *prefix) {
+// startswith: returns true if str starts with prefix.
+bool startswith(const char *str, const char *prefix) {
     return strncmp(str, prefix, strlen(prefix)) == 0;
 }
 
-static bool endswith(const char *str, const char *suffix) {
+// endswith: returns true if str ends with suffix.
+bool endswith(const char *str, const char *suffix) {
     size_t str_len = strlen(str);
     size_t suffix_len = strlen(suffix);
-
-    if (suffix_len > str_len)
-        return false;
-
-    return strcmp(str + str_len - suffix_len, suffix) == 0;
+    return (suffix_len <= str_len) && strcmp(str + str_len - suffix_len, suffix) == 0;
 }
 
 // ================================================================================================
 // Array Helpers
 // ================================================================================================
 
+// AddString: Adds a string to a StringArray struct.
+// Note: Memory errors terminate the program.
 void AddString(StringArray* array, const char* string) {
 
     if (array->count == array->capacity) {
-        size_t new_capacity = array->capacity == 0
-            ? 16
-            : array->capacity * 2;
-
-        char** new_items = realloc(
-            array->items,
-            new_capacity * sizeof(char*)
-        );
+        size_t new_capacity = array->capacity == 0 ? 16 : array->capacity * 2;
+        char** new_items = realloc(array->items, new_capacity * sizeof(char*));
 
         if (!new_items) {
             puts("Error: Could not expand StringArray!");
@@ -171,6 +167,7 @@ void AddString(StringArray* array, const char* string) {
     array->count++;
 }
 
+// FreeList: Frees a StringArray.
 void FreeList(StringArray* array) {
     for (size_t i = 0; i < array->count; i++)
         free(array->items[i]);
@@ -182,16 +179,12 @@ void FreeList(StringArray* array) {
     array->capacity = 0;
 }
 
+// AddCondition: Adds a Condition to a ConditionArray struct.
+// Note: Memory errors terminate the program.
 void AddCondition(ConditionArray* array, Condition cond) {
     if (array->count == array->capacity) {
-        size_t new_capacity = array->capacity == 0
-            ? 16
-            : array->capacity * 2;
-
-        Condition* new_items = realloc(
-            array->items,
-            new_capacity * sizeof(Condition)
-        );
+        size_t new_capacity = array->capacity == 0 ? 16 : array->capacity * 2;
+        Condition* new_items = realloc(array->items, new_capacity * sizeof(Condition));
 
         if (!new_items) {
             puts("Error: Could not expand ConditionArray!");
@@ -224,12 +217,20 @@ void FreeConditions(ConditionArray* array) {
 // I/O Operations
 // ================================================================================================
 
+/* byte_count:
+ *     - path: A path to a file or folder as a string.
+ *
+ * If the path is a file, returns the size of the file.
+ * If the path is a folder, recurses through the folder and returns the size of all nested files.
+ * Special files are not counted. */
 static long long byte_count(const char* path) {
     struct stat st;
 
+    // Check if file exists
     if (stat(path, &st) != 0)
         return -1;
 
+    // If file, return file size
     if (S_ISREG(st.st_mode))
         return (long long)st.st_size;
 
@@ -241,12 +242,12 @@ static long long byte_count(const char* path) {
         long long total = 0;
         struct dirent* entry;
 
+        // Sum each item in the folder, excluding "." and ".."
         while ((entry = readdir(dir)) != NULL) {
             if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
                 continue;
 
             char child_path[PATH_MAX];
-
             snprintf(child_path, sizeof(child_path), "%s/%s", path, entry->d_name);
 
             long long size = byte_count(child_path);
@@ -267,6 +268,10 @@ static long long byte_count(const char* path) {
     return -1;
 }
 
+/* parse_bytes:
+ *     - str: A string representing a size in bytes ("1GB", "50MB")
+ *
+ * Takes a string representing a metric byte count and returns the number of bytes as a long. */
 static long long parse_bytes(const char* str) {
     char* end;
     double value;
@@ -298,42 +303,55 @@ static long long parse_bytes(const char* str) {
     if (*end != '\0')
         return -1;
 
-    if (strcmp(unit, "b") == 0)
+    if (str_equals(unit, "b"))
         multiplier = 1;
-    else if (strcmp(unit, "kb") == 0)
+    else if (str_equals(unit, "kb"))
         multiplier = 1024LL;
-    else if (strcmp(unit, "mb") == 0)
+    else if (str_equals(unit, "mb"))
         multiplier = 1024LL * 1024;
-    else if (strcmp(unit, "gb") == 0)
+    else if (str_equals(unit, "gb"))
         multiplier = 1024LL * 1024 * 1024;
-    else if (strcmp(unit, "tb") == 0)
+    else if (str_equals(unit, "tb"))
         multiplier = 1024LL * 1024 * 1024 * 1024;
     else if (unit[0] == '\0')
         multiplier = 1;
     else
-        return -1;  // Unknown unit
+        // Unknown unit
+        return -1;
 
     return (long long)(value * multiplier);
 }
 
+// is_executable: returns true if a path is executable (+x bit)
 static bool is_executable(const char* path) {
     return access(path, X_OK) == 0;
 }
 
+/* has_permission:
+ *     - path: A string for the location of the file.
+ *     - permissions: The octal permission bits to check (0644, 2770, etc.)
+ * 
+ * returns true if the given file/folder has the EXACT permission bits as the given pattern. */
 static bool has_permission(const char* path, char* permissions) {
     struct stat st;
     char* end;
     long mode = strtol(permissions, &end, 8);
 
-    if (*permissions == '\0' || *end != '\0' || mode < 0 || mode > 0777)
-        return false;
-
-    if (stat(path, &st) != 0)
-        return false;
-
-    return (st.st_mode & 0777) == (mode & 0777);
+    return !(
+        // permissions is a valid string
+        *permissions == '\0' || 
+        // end was initialized properly
+        *end != '\0' || 
+        // mode is a valid octal
+        mode < 0 || mode > 0777 || 
+        // file exists
+        stat(path, &st) != 0
+    ) && 
+    // permission bits are equal
+    (st.st_mode & 0777) == (mode & 0777);
 }
 
+// basename: returns the name of the file/folder with the parent path stripped out.
 static const char* basename(const char* path) {
     const char* last = strrchr(path, '/');
     return last ? last + 1 : path;
@@ -359,9 +377,7 @@ static bool file_contains(const char* path, const char* needle) {
         return false;
     }
 
-    size_t n = fread(content, 1, file_size, f);
-    content[n] = '\0';
-
+    content[fread(content, 1, file_size, f)] = '\0';
     bool found = strstr(content, needle) != NULL;
 
     free(content);
@@ -562,7 +578,8 @@ static void search_recursive(const char* path, FindCommand* command, StringArray
                     met = match_count(
                         count_directory(fullpath, cond.count_what, cond.count_shallow),
                         cond.compare_op,
-                        cond.count_target);
+                        cond.count_target
+                    );
                     break;
             }
 
@@ -582,6 +599,8 @@ static void search_recursive(const char* path, FindCommand* command, StringArray
                 AddString(results, fullpath);
             else if (command->type == TYPE_FOLDERS && S_ISDIR(st.st_mode))
                 AddString(results, fullpath);
+            else if (command->type == TYPE_ITEMS && (S_ISREG(st.st_mode) || S_ISDIR(st.st_mode)))
+                AddString(results, fullpath);
         }
 
         if (S_ISDIR(st.st_mode) && command->recursive)
@@ -600,7 +619,8 @@ static int exec_action(FindCommand* command, StringArray* results) {
     }
 
     if (command->action == ACTION_DELETE) {
-        printf("Delete %zu %s? [y/N] ", results->count, command->type == TYPE_FILES ? "files" : "folders");
+        printf("Delete %zu %s? [y/N] ", results->count,
+            command->type == TYPE_FILES ? "files" : command->type == TYPE_FOLDERS ? "folders" : "items");
         fflush(stdout);
 
         char line[16];
@@ -631,7 +651,8 @@ static int exec_action(FindCommand* command, StringArray* results) {
             if (!ok)
                 fprintf(stderr, "Failed to %s: %s\n",
                     command->action == ACTION_MOVE ? "move" : "copy",
-                    results->items[j]);
+                    results->items[j]
+                );
         }
 
         return EXIT_SUCCESS;
@@ -707,7 +728,8 @@ int help(int code) {
 
                 "TYPES\n"
                 "    files       Search for files\n"
-                "    folders     Search for directories\n\n"
+                "    folders     Search for directories\n"
+                "    items       Search for both files and directories\n\n"
 
                 "FLAGS\n"
                 "    shallow     Only search the specified directory (no recursion)\n\n"
@@ -745,7 +767,7 @@ int help(int code) {
             );
             return EXIT_SUCCESS;
         case 1:
-            fputs("find: <type> must be \"files\" or \"folders\".\n", stderr);
+            fputs("find: <type> must be \"files\", \"folders\", or \"items\".\n", stderr);
             return EXIT_FAILURE;
         case 2:
             fputs("find: expected a path after \"in\".\n", stderr);
@@ -767,6 +789,9 @@ int help(int code) {
             return EXIT_FAILURE;
         case 8:
             fputs("find: Unexpected argument after action.\n", stderr);
+            return EXIT_FAILURE;
+        case 9:
+            fputs("find: \"contents contains\" is not valid with type \"items\".\n", stderr);
             return EXIT_FAILURE;
         default:
             return EXIT_FAILURE;
@@ -790,6 +815,8 @@ int main(int argc, char* argv[]) {
                     command.type = TYPE_FILES;
                 else if (str_equals(argv[i], "folders"))
                     command.type = TYPE_FOLDERS;
+                else if (str_equals(argv[i], "items"))
+                    command.type = TYPE_ITEMS;
                 else
                     return help(1);
 
@@ -914,6 +941,9 @@ int main(int argc, char* argv[]) {
                         else if (!str_equals(argv[i], "contains"))
                             return help(4);
 
+                        if (command.type == TYPE_ITEMS)
+                            return help(9);
+
                         if (command.type == TYPE_FILES)
                             cond_type = CONDITION_FILE_CONTAINS;
                         else {
@@ -927,10 +957,14 @@ int main(int argc, char* argv[]) {
 
                             if (str_equals(tok, ">") || str_equals(tok, ">=") ||
                                 str_equals(tok, "<") || str_equals(tok, "<=")) {
-                                if (str_equals(tok, ">"))  op = CMP_GT;
-                                if (str_equals(tok, ">=")) op = CMP_GTE;
-                                if (str_equals(tok, "<"))  op = CMP_LT;
-                                if (str_equals(tok, "<=")) op = CMP_LTE;
+                                if (str_equals(tok, ">"))
+                                    op = CMP_GT;
+                                if (str_equals(tok, ">="))
+                                    op = CMP_GTE;
+                                if (str_equals(tok, "<"))
+                                    op = CMP_LT;
+                                if (str_equals(tok, "<="))
+                                    op = CMP_LTE;
                                 if (++i >= argc)
                                     return help(3);
                                 tok = argv[i];
@@ -1061,7 +1095,6 @@ int main(int argc, char* argv[]) {
                     state = STATE_DONE;
 
                 break;
-
             case STATE_DONE:
             case STATE_ERROR:
                 break;
