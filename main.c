@@ -68,8 +68,8 @@ typedef enum {
 
 typedef enum {
     STATE_TYPE,
+    STATE_MODIFIER,
     STATE_PATHS,
-    STATE_WHERE,
     STATE_CONDITION,
     STATE_ACTION,
     STATE_DONE,
@@ -113,6 +113,8 @@ typedef struct {
     char* action_value;
     StringArray command_template;
     bool recursive;
+    bool include_hidden;
+    bool include_visible;
 } FindCommand;
 
 // ================================================================================================
@@ -615,7 +617,7 @@ static bool path_covered(StringArray* paths, const char* path) {
  *     - shallow: If true, do not use recursion.
  *
  * Counts the number of items in the given directory with the given parameters. */
-static long count_directory(const char* path, CountWhat what, bool shallow) {
+static long count_directory(const char* path, CountWhat what, bool shallow, bool include_hidden, bool include_visible) {
 
     // Open folder and read contents
     DIR* dir = opendir(path);
@@ -630,7 +632,12 @@ static long count_directory(const char* path, CountWhat what, bool shallow) {
         if (str_equals(entry->d_name, ".") || str_equals(entry->d_name, ".."))
             continue;
 
-        // Read an item
+        // Filter by visibility.
+        bool is_hidden = entry->d_name[0] == '.';
+        if (include_hidden && !is_hidden)
+            continue;
+        if (include_visible && is_hidden)
+            continue;
         char fullpath[4096];
         snprintf(fullpath, sizeof(fullpath), "%s/%s", path, entry->d_name);
 
@@ -658,7 +665,7 @@ static long count_directory(const char* path, CountWhat what, bool shallow) {
 
         // If shallow search is disabled and the item is a directory, recursive search.
         if (!shallow && S_ISDIR(st.st_mode))
-            count += count_directory(fullpath, what, shallow);
+            count += count_directory(fullpath, what, shallow, include_hidden, include_visible);
     }
 
     closedir(dir);
@@ -689,7 +696,7 @@ static bool match_count(long actual, CompareOp op, long target) {
  *     - cond: The condition to evaluate.
  *
  * Evaluates a single condition against an item, applying its negation if set. */
-static bool eval_condition(const char* fullpath, const char* name, const Condition* cond) {
+static bool eval_condition(const char* fullpath, const char* name, const Condition* cond, bool include_hidden, bool include_visible) {
     bool met = false;
 
     switch (cond->type) {
@@ -720,17 +727,17 @@ static bool eval_condition(const char* fullpath, const char* name, const Conditi
         case CONDITION_FILE_CONTAINS:
             met = file_contains(fullpath, cond->value);
             break;
-        case CONDITION_FOLDER_CONTAINS:
+        case CONDITION_FOLDER_CONTAINS: {
             met = match_count(
-                count_directory(fullpath, cond->count_what, cond->count_shallow),
+                count_directory(fullpath, cond->count_what, cond->count_shallow, include_hidden, include_visible),
                 cond->compare_op,
                 cond->count_target
             );
             break;
+        }
         case CONDITION_CONTENTS_SIMILAR: {
             double similarity = file_similarity(fullpath, cond->reference_file);
-            met = similarity >= 0.0 &&
-                  similarity >= (cond->similarity_threshold - 0.02);
+            met = similarity >= 0.0 && similarity >= (cond->similarity_threshold - 0.02);
             break;
         }
     }
@@ -769,12 +776,24 @@ static void search_recursive(const char* path, FindCommand* command, StringArray
         if (lstat(fullpath, &st) != 0)
             continue;
 
+        // Always recurse into subdirectories, regardless of the visibility filter,
+        // so hidden files nested inside visible directories are still found.
+        if (S_ISDIR(st.st_mode) && command->recursive)
+            search_recursive(fullpath, command, results);
+
+        // Filter by visibility: skip hidden entries if only visible requested, and vice versa.
+        bool is_hidden = entry->d_name[0] == '.';
+        if (command->include_hidden && !is_hidden)
+            continue;
+        if (command->include_visible && is_hidden)
+            continue;
+
         // If the command has no conditions, it has automatically been met.
         bool condition_met = true;
 
         // Combine conditions left to right, with no operator precedence.
         for (size_t c = 0; c < command->conditions.count; c++) {
-            bool met = eval_condition(fullpath, entry->d_name, &command->conditions.items[c]);
+            bool met = eval_condition(fullpath, entry->d_name, &command->conditions.items[c], command->include_hidden, command->include_visible);
 
             if (c == 0)
                 condition_met = met;
@@ -793,10 +812,6 @@ static void search_recursive(const char* path, FindCommand* command, StringArray
             else if (command->type == TYPE_ITEMS && (S_ISREG(st.st_mode) || S_ISDIR(st.st_mode)))
                 AddString(results, fullpath);
         }
-
-        // If the current item is a directory, then recursive search
-        if (S_ISDIR(st.st_mode) && command->recursive)
-            search_recursive(fullpath, command, results);
     }
     closedir(dir);
 }
@@ -936,7 +951,7 @@ int help(int code) {
                 "find.c - Find and operate on files with readable syntax.\n\n"
 
                 "SYNOPSIS\n"
-                "    find <type> [shallow] [in <paths>] [where <conditions>] [then <action>]\n\n"
+                "    find <type> [shallow] [visible|hidden] [in <paths>] [where <conditions>] [then <action>]\n\n"
 
                 "TYPES\n"
                 "    files       Search for files\n"
@@ -944,7 +959,12 @@ int help(int code) {
                 "    items       Search for both files and directories\n\n"
 
                 "FLAGS\n"
-                "    shallow     Only search the specified directory (no recursion)\n\n"
+                "    The program by default includes both hidden and visible files.\n"
+                "    You cannot include both the hidden and visible flags\n\n"
+
+                "    shallow     Only search the specified directory (no recursion)\n"
+                "    visible     Only search visible files (Exclude hidden files)\n"
+                "    hidden      Only search hidden files (Exclude visible files)\n"
 
                 "PATHS\n"
                 "    in <dir> [and <dir>...]\n"
@@ -954,6 +974,7 @@ int help(int code) {
                 "    All conditions can be prefixed with \"not\" to negate them.\n"
                 "    Conditions are combined left to right with \"and\" or \"or\".\n"
                 "    There is no operator precedence; the expression is evaluated in order.\n\n"
+
                 "    name contains <str>       Filename contains <str>\n"
                 "    name startswith <str>     Filename starts with <str>\n"
                 "    name endswith <str>       Filename ends with <str>\n"
@@ -1017,14 +1038,31 @@ int help(int code) {
         case 10:
             fputs("find: \"contents similar\" is only valid with type \"files\".\n", stderr);
             return EXIT_FAILURE;
+        case 11:
+            fputs("find: \"hidden\" and \"visible\" cannot be used together (find searches both by default). \n", stderr);
+            return EXIT_FAILURE;
+        case 12:
+            fputs("find: Invalid \"end\" (did you mean \"endswith\")?", stderr);
+            return EXIT_FAILURE;
+        case 13:
+            fputs("find: Invalid \"starts\" (did you mean \"startswith\")?", stderr);
+            return EXIT_FAILURE;
         default:
             return EXIT_FAILURE;
     }
 }
 
+/* main:
+ *     - argc: The number of command line arguments.
+ *     - argv: The array of command line argument strings.
+ *
+ * Parses the command line arguments using a state machine that transitions through
+ * the following states: STATE_TYPE -> STATE_PATHS -> STATE_CONDITION -> STATE_ACTION -> STATE_DONE.
+ * Each state consumes arguments and populates the FindCommand struct accordingly.
+ * Once parsing is complete, the search is executed and the action is performed on the results. */
 int main(int argc, char* argv[]) {
 
-    /* If only binary name passed, display help. */
+    // If only binary name passed, display help.
     if (argc == 1)
         return help(0);
 
@@ -1032,9 +1070,13 @@ int main(int argc, char* argv[]) {
     FindCommand command = {0};
     ParserState state = STATE_TYPE;
 
+    // State machine loop: continues until a final state (DONE or ERROR) is reached.
     while (state != STATE_DONE && state != STATE_ERROR) {
         switch (state) {
-            case STATE_TYPE:
+            /* STATE_TYPE:
+             * Parses the first argument to determine what to search for (files, folders, or items).
+             * Sets default flags and transitions to STATE_MODIFIER to handle optional keyword modifiers. */
+            case STATE_TYPE: {
                 if (str_equals(argv[i], "files"))
                     command.type = TYPE_FILES;
                 else if (str_equals(argv[i], "folders"))
@@ -1045,31 +1087,36 @@ int main(int argc, char* argv[]) {
                     return help(1);
 
                 command.recursive = true;
-
-                if (++i >= argc) {
+                i++;
+                state = STATE_MODIFIER;
+                break;
+            }
+            /* STATE_MODIFIER:
+             * Handles optional keyword modifiers: "shallow", "visible", "hidden".
+             * Loops back to itself for each modifier found, then transitions to
+             * STATE_PATHS, STATE_CONDITION, STATE_ACTION, or STATE_DONE depending
+             * on the next argument, or finishes if no more arguments remain. */
+            case STATE_MODIFIER: {
+                if (i >= argc) {
                     AddString(&command.paths, ".");
                     command.action = ACTION_PRINT;
                     state = STATE_DONE;
                 }
                 else if (str_equals(argv[i], "shallow")) {
                     command.recursive = false;
-                    if (++i >= argc) {
-                        AddString(&command.paths, ".");
-                        command.action = ACTION_PRINT;
-                        state = STATE_DONE;
-                    }
-                    else if (str_equals(argv[i], "in"))
-                        state = STATE_PATHS;
-                    else if (str_equals(argv[i], "where")) {
-                        AddString(&command.paths, ".");
-                        state = STATE_CONDITION;
-                    }
-                    else if (str_equals(argv[i], "then")) {
-                        AddString(&command.paths, ".");
-                        state = STATE_ACTION;
-                    }
-                    else
-                        return help(0);
+                    i++;
+                }
+                else if (str_equals(argv[i], "visible")) {
+                    if (command.include_hidden)
+                        return help(11);
+                    command.include_visible = true;
+                    i++;
+                }
+                else if (str_equals(argv[i], "hidden")) {
+                    if (command.include_visible)
+                        return help(11);
+                    command.include_hidden = true;
+                    i++;
                 }
                 else if (str_equals(argv[i], "in"))
                     state = STATE_PATHS;
@@ -1085,10 +1132,18 @@ int main(int argc, char* argv[]) {
                     return help(0);
 
                 break;
-            case STATE_PATHS:
+            }
+            /* STATE_PATHS:
+             * Collects one or more directory paths following the "in" keyword.
+             * Paths are separated by "and" keywords, which are skipped during parsing.
+             * Parsing stops when "where" or "then" is encountered, or when arguments are exhausted.
+             * Defaults to the current directory (".") if no paths were explicitly given. */
+            case STATE_PATHS: {
                 i++;
+                // Collect paths until we hit a state keyword or run out of arguments.
                 while (i < argc && !str_equals(argv[i], "where") && !str_equals(argv[i], "then")) {
 
+                    // Skip "and" separators between paths (e.g., "in src and lib").
                     if (str_equals(argv[i], "and")) {
                         i++;
                         continue;
@@ -1100,6 +1155,7 @@ int main(int argc, char* argv[]) {
                 if (command.paths.count == 0)
                     return help(2);
                 else if (i >= argc) {
+                    // No conditions or action specified; default to printing results.
                     command.action = ACTION_PRINT;
                     state = STATE_DONE;
                 }
@@ -1109,10 +1165,18 @@ int main(int argc, char* argv[]) {
                     state = STATE_ACTION;
 
                 break;
-            case STATE_CONDITION:
+            }
+            /* STATE_CONDITION:
+             * Parses one or more conditions after the "where" keyword.
+             * Each condition consists of a type (name, size, perms, contents), optional negation ("not"),
+             * and a value/parameter. Conditions are linked by "and"/"or" operators with no precedence.
+             * The loop continues until "then" is encountered (transitioning to STATE_ACTION)
+             * or arguments are exhausted. Each parsed condition is added to the command's ConditionArray. */
+            case STATE_CONDITION: {
                 // The operator linking the next condition to the previous one.
                 LogicOp next_op = LOGIC_AND;
 
+                // Infinite loop that breaks when "then" is found or arguments are exhausted.
                 for (;;) {
                     bool contains_keyword = true;
                     bool negated = false;
@@ -1124,12 +1188,14 @@ int main(int argc, char* argv[]) {
                     if (++i >= argc)
                         return help(3);
 
+                    // Check for optional "not" negation before the condition.
                     if (str_equals(argv[i], "not")) {
                         negated = true;
                         if (++i >= argc)
                             return help(3);
                     }
 
+                    // Parse "name" conditions: contains, startswith, endswith.
                     if (str_equals(argv[i], "name")) {
                         if (++i >= argc)
                             return help(3);
@@ -1137,11 +1203,16 @@ int main(int argc, char* argv[]) {
                             cond_type = CONDITION_NAME_CONTAINS;
                         else if (str_equals(argv[i], "endswith"))
                             cond_type = CONDITION_ENDSWITH;
+                        else if (str_equals(argv[i], "ends"))
+                            return help(12);
                         else if (str_equals(argv[i], "startswith"))
                             cond_type = CONDITION_STARTSWITH;
+                        else if (str_equals(argv[i], "starts"))
+                            return help(13);
                         else
                             return help(4);
                     }
+                    // Parse "size" conditions: lessthan, greaterthan (uses parse_bytes for units like "5mb").
                     else if (str_equals(argv[i], "size")) {
                         if (++i >= argc)
                             return help(3);
@@ -1152,10 +1223,12 @@ int main(int argc, char* argv[]) {
                         else
                             return help(4);
                     }
+                    // Parse "perms" conditions: exec (executable bit) or is (exact permission bits).
                     else if (str_equals(argv[i], "perms")) {
                         if (++i >= argc)
                             return help(3);
                         else if (str_equals(argv[i], "exec")) {
+                            // "perms exec" has no value keyword; it just tests the executable bit.
                             cond_type = CONDITION_EXECUTABLE;
                             contains_keyword = false;
                         }
@@ -1164,11 +1237,14 @@ int main(int argc, char* argv[]) {
                         else
                             return help(4);
                     }
+                    // Parse "contents" conditions: contains (file content search), similar (file similarity), or folder containment count.
                     else if (str_equals(argv[i], "contents")) {
                         if (++i >= argc)
                             return help(3);
+                        // "contents similar <pct> to <file>" syntax
                         else if (str_equals(argv[i], "similar")) {
                             // Syntax: contents similar <pct> to <file>
+                            // Similarity comparison only valid for file searches.
                             if (command.type != TYPE_FILES)
                                 return help(10);
                             if (++i >= argc)
@@ -1212,9 +1288,11 @@ int main(int argc, char* argv[]) {
                             return help(9);
 
                         if (cond_type != CONDITION_CONTENTS_SIMILAR) {
+                            // For file searches, use substring matching on file contents.
                             if (command.type == TYPE_FILES)
                                 cond_type = CONDITION_FILE_CONTAINS;
                             else {
+                            // For folder searches, parse the comparison operator, target count, and count type.
                             cond_type = CONDITION_FOLDER_CONTAINS;
 
                             if (++i >= argc)
@@ -1223,6 +1301,7 @@ int main(int argc, char* argv[]) {
                             CompareOp op = CMP_EQ;
                             const char* tok = argv[i];
 
+                            // Parse comparison operator: can be a separate token (">", ">=") or prefix (">5").
                             if (str_equals(tok, ">") || str_equals(tok, ">=") ||
                                 str_equals(tok, "<") || str_equals(tok, "<=")) {
                                 if (str_equals(tok, ">"))
@@ -1245,6 +1324,7 @@ int main(int argc, char* argv[]) {
                                 tok += (tok[1] == '=') ? 2 : 1;
                             }
 
+                            // Parse the numeric target for the comparison.
                             char* end;
                             long target = strtol(tok, &end, 10);
                             if (end == tok || target < 0 || *end != '\0')
@@ -1253,6 +1333,7 @@ int main(int argc, char* argv[]) {
                             if (++i >= argc)
                                 return help(3);
 
+                            // Parse what to count: items, files, or folders.
                             CountWhat what;
                             if (str_equals(argv[i], "items"))
                                 what = COUNT_ITEMS;
@@ -1263,6 +1344,7 @@ int main(int argc, char* argv[]) {
                             else
                                 return help(4);
 
+                            // Optional "shallow" flag to disable recursion when counting.
                             bool shallow = false;
                             if (i + 1 < argc && str_equals(argv[i + 1], "shallow")) {
                                 shallow = true;
@@ -1272,6 +1354,7 @@ int main(int argc, char* argv[]) {
                             cond_value = NULL;
                             contains_keyword = false;
 
+                            // Add the folder contains condition directly since it has a complex structure.
                             AddCondition(&command.conditions, (Condition){
                                 .type = CONDITION_FOLDER_CONTAINS,
                                 .value = NULL,
@@ -1305,6 +1388,7 @@ int main(int argc, char* argv[]) {
                         }
                     }
 
+                    // For conditions that require a value keyword (e.g., "name contains <str>").
                     if (contains_keyword) {
                         if (++i >= argc)
                             return help(3);
@@ -1321,19 +1405,24 @@ int main(int argc, char* argv[]) {
                         .reference_file = (char*)reference_file,
                     });
 
+                    // Determine the next state based on the following argument.
                     if (++i >= argc) {
+                        // No more arguments; finish parsing.
                         state = STATE_DONE;
                         break;
                     }
                     else if (str_equals(argv[i], "and")) {
+                        // Link next condition with AND.
                         next_op = LOGIC_AND;
                         continue;
                     }
                     else if (str_equals(argv[i], "or")) {
+                        // Link next condition with OR.
                         next_op = LOGIC_OR;
                         continue;
                     }
                     else if (str_equals(argv[i], "then")) {
+                        // Transition to the action state.
                         state = STATE_ACTION;
                         break;
                     }
@@ -1342,7 +1431,16 @@ int main(int argc, char* argv[]) {
                 }
 
                 break;
-            case STATE_ACTION:
+            }
+
+            /* STATE_ACTION:
+             * Parses the action to perform on the search results after the "then" keyword.
+             * Supported actions: moveto (move files), copyto (copy files), delete (remove files),
+             * or command (run a custom command with {file} placeholder expansion).
+             * moveto/copyto require a destination directory argument.
+             * command collects all remaining arguments as the command template.
+             * delete takes no additional arguments. */
+            case STATE_ACTION: {
                 if (++i >= argc)
                     return help(6);
                 else if (str_equals(argv[i], "moveto"))
@@ -1380,15 +1478,20 @@ int main(int argc, char* argv[]) {
                     state = STATE_DONE;
 
                 break;
+            }
             case STATE_DONE:
             case STATE_ERROR:
                 break;
         }
     }
 
+    // Execute the search using the populated FindCommand struct.
     StringArray results = search(&command);
+
+    // Perform the specified action on the search results.
     int exit_code = exec_action(&command, &results);
 
+    // Clean up all dynamically allocated memory.
     FreeList(&results);
     FreeConditions(&command.conditions);
     FreeList(&command.command_template);
