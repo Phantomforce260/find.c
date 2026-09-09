@@ -12,6 +12,7 @@
 #include <linux/limits.h>
 #include <ctype.h>
 #include <unistd.h>
+#include <time.h>
 
 // ================================================================================================
 // Enums
@@ -36,7 +37,9 @@ typedef enum {
     CONDITION_EXECUTABLE,
     CONDITION_PERM_BITS,
 
-    CONDITION_CONTENTS_SIMILAR
+    CONDITION_CONTENTS_SIMILAR,
+    CONDITION_OLDERTHAN,
+    CONDITION_NEWERTHAN
 } ConditionType;
 
 typedef enum {
@@ -116,6 +119,8 @@ typedef struct {
     bool include_hidden;
     bool include_visible;
 } FindCommand;
+
+#define TIME_ERROR (time_t)-1
 
 // ================================================================================================
 // Function Headers
@@ -340,6 +345,89 @@ static long long parse_bytes(const char* str) {
         return -1;
 
     return (long long)(value * multiplier);
+}
+
+/* parse_date:
+ *     - str: The date to parse.
+ *
+ * Converts a date string to a time_t reference point.
+ * Supports relative durations like "40s", "6m", "8h", "1D", "4W", "3M", "2Y"
+ * (measured backward from now), or an absolute date like "MM.DD.YY".
+ * The returned time represents the cutoff: files modified after it are newer,
+ * files modified before it are older. */
+static time_t parse_date(const char* str) {
+    // Absolute date "MM.DD.YY"
+    if (strchr(str, '.') != NULL) {
+        int mm = 0, dd = 0, yy = 0;
+
+        // (time_t)-1 is a sentinel for a conversion error.
+        // Functions that receive this value should error.
+        if (sscanf(str, "%d.%d.%d", &mm, &dd, &yy) != 3)
+            return (time_t)-1;
+
+        if (mm < 1 || mm > 12 || dd < 1 || dd > 31 || yy < 0 || yy > 99)
+            return (time_t)-1;
+
+        struct tm tm;
+        memset(&tm, 0, sizeof(tm));
+        tm.tm_year = (yy >= 70 ? yy : 100 + yy); // 70-99 -> 1970-1999, 00-69 -> 2000-2069
+        tm.tm_mon = mm - 1;
+        tm.tm_mday = dd;
+        tm.tm_isdst = -1;
+        return mktime(&tm);
+    }
+
+    // Relative duration like "40s", "6m", "8h", "1D", "4W", "3M", "2Y"
+    char* end;
+    double value = strtod(str, &end);
+    if (end == str)
+        return (time_t)-1;
+
+    while (isspace((unsigned char)*end))
+        end++;
+
+    char unit = *end;
+    if (unit == '\0')
+        return (time_t)-1;
+
+    // Accept both the documented cases and their lowercase/uppercase variants
+    // (e.g. "S", "H", "d", "y"), but flag exact-case mismatches so the caller
+    // can alert the user. The canonical forms are: s m h D W M Y.
+    char canonical;
+    switch (unit) {
+        case 's': case 'S': canonical = 's'; break;
+        case 'm': canonical = 'm'; break;
+        case 'h': case 'H': canonical = 'h'; break;
+        case 'd': case 'D': canonical = 'D'; break;
+        case 'w': case 'W': canonical = 'W'; break;
+        case 'M': canonical = 'M'; break;
+        case 'y': case 'Y': canonical = 'Y'; break;
+        default: return (time_t)-1;
+    }
+
+    if (unit != canonical)
+        return (time_t)-2; // wrong-case unit
+
+    time_t now = time(NULL);
+    time_t multiplier;
+    switch (unit) {
+        case 's': multiplier = 1;               break; // seconds
+        case 'm': multiplier = 60;              break; // minutes
+        case 'h': multiplier = 60 * 60;         break; // hours
+        case 'D': multiplier = 24 * 60 * 60;    break; // days
+        case 'W': multiplier = 7 * 24 * 60 * 60; break; // weeks
+        case 'M': multiplier = 30 * 24 * 60 * 60; break; // months (approx 30 days)
+        case 'Y': multiplier = 365 * 24 * 60 * 60; break; // years (approx 365 days)
+        default: return (time_t)-1;
+    }
+
+    end++;
+    while (isspace((unsigned char)*end))
+        end++;
+    if (*end != '\0')
+        return (time_t)-1;
+
+    return now - (time_t)(value * multiplier);
 }
 
 // is_executable: returns true if a path is executable (+x bit)
@@ -634,10 +722,9 @@ static long count_directory(const char* path, CountWhat what, bool shallow, bool
 
         // Filter by visibility.
         bool is_hidden = entry->d_name[0] == '.';
-        if (include_hidden && !is_hidden)
+        if ((include_hidden && !is_hidden) || (include_visible && is_hidden))
             continue;
-        if (include_visible && is_hidden)
-            continue;
+
         char fullpath[4096];
         snprintf(fullpath, sizeof(fullpath), "%s/%s", path, entry->d_name);
 
@@ -712,6 +799,20 @@ static bool eval_condition(const char* fullpath, const char* name, const Conditi
         case CONDITION_ENDSWITH:
             met = endswith(name, cond->value);
             break;
+        case CONDITION_OLDERTHAN:
+        case CONDITION_NEWERTHAN: {
+            struct stat st;
+            time_t cutoff = parse_date(cond->value);
+            if (cutoff == (time_t)-1 || stat(fullpath, &st) != 0) {
+                met = false;
+                break;
+            }
+            // olderthan: mtime before the cutoff; newerthan: mtime after the cutoff
+            met = (cond->type == CONDITION_OLDERTHAN)
+                ? st.st_mtime < cutoff
+                : st.st_mtime > cutoff;
+            break;
+        }
         case CONDITION_GREATERTHAN:
             met = byte_count(fullpath) > parse_bytes(cond->value);
             break;
@@ -944,6 +1045,11 @@ static int exec_action(FindCommand* command, StringArray* results) {
 // Main Code
 // ================================================================================================
 
+int err(const char* msg) {
+    fputs(msg, stderr);
+    return EXIT_FAILURE;
+}
+
 int help(int code) {
     switch (code) {
         case 0:
@@ -987,7 +1093,10 @@ int help(int code) {
                 "    size lessthan <size>      File size less than <size>\n"
                 "    perms is <octal>          Permission bits match <octal> (e.g. 644)\n"
                 "    perms exec                File is executable\n\n"
-                "    <size> can be: 100, 10kb, 5mb, 2gb, 1tb\n\n"
+                "    <size> can be: 100, 10kb, 5mb, 2gb, 1tb\n"
+                "    date olderthan <date>     File was last modified before <date>\n"
+                "    date newerthan <date>     File was last modified after <date>\n"
+                "    <date> can be 40s 6m 8h 1D 4W 3M 2Y or MM.DD.YY\n\n"
 
                 "ACTIONS\n"
                 "    moveto <dir>              Move matching files to <dir>\n"
@@ -1009,44 +1118,33 @@ int help(int code) {
             );
             return EXIT_SUCCESS;
         case 1:
-            fputs("find: <type> must be \"files\", \"folders\", or \"items\".\n", stderr);
-            return EXIT_FAILURE;
+            return err("find: <type> must be \"files\", \"folders\", or \"items\".\n");
         case 2:
-            fputs("find: expected a path after \"in\".\n", stderr);
-            return EXIT_FAILURE;
+            return err("find: expected a path after \"in\".\n");
         case 3:
-            fputs("find: incomplete or missing condition after \"where\".\n", stderr);
-            return EXIT_FAILURE;
+            return err("find: incomplete or missing condition after \"where\".\n");
         case 4:
-            fputs("find: unknown condition. Expected: name, size, perms, or contents.\n", stderr);
-            return EXIT_FAILURE;
+            return err("find: unknown condition. Expected: name, size, perms, or contents.\n");
         case 5:
-            fputs("find: expected \"then\", \"and\", or \"or\" after condition.\n", stderr);
-            return EXIT_FAILURE;
+            return err("find: expected \"then\", \"and\", or \"or\" after condition.\n");
         case 6:
-            fputs("find: expected an action: moveto, copyto, delete, or command.\n", stderr);
-            return EXIT_FAILURE;
+            return err("find: expected an action: moveto, copyto, delete, or command.\n");
         case 7:
-            fputs("find: incomplete action. moveto/copyto require a destination, command requires arguments.\n", stderr);
-            return EXIT_FAILURE;
+            return err("find: incomplete action. moveto/copyto require a destination, command requires arguments.\n");
         case 8:
-            fputs("find: Unexpected argument after action.\n", stderr);
-            return EXIT_FAILURE;
+            return err("find: Unexpected argument after action.\n");
         case 9:
-            fputs("find: \"contents contains\" is not valid with type \"items\".\n", stderr);
-            return EXIT_FAILURE;
+            return err("find: \"contents contains\" is not valid with type \"items\".\n");
         case 10:
-            fputs("find: \"contents similar\" is only valid with type \"files\".\n", stderr);
-            return EXIT_FAILURE;
+            return err("find: \"contents similar\" is only valid with type \"files\".\n");
         case 11:
-            fputs("find: \"hidden\" and \"visible\" cannot be used together (find searches both by default). \n", stderr);
-            return EXIT_FAILURE;
+            return err("find: \"hidden\" and \"visible\" cannot be used together (find searches both by default). \n");
         case 12:
-            fputs("find: Invalid \"end\" (did you mean \"endswith\")?", stderr);
-            return EXIT_FAILURE;
+            return err("find: Invalid \"end\" (did you mean \"endswith\")?");
         case 13:
-            fputs("find: Invalid \"starts\" (did you mean \"startswith\")?", stderr);
-            return EXIT_FAILURE;
+            return err("find: Invalid \"starts\" (did you mean \"startswith\")?");
+        case 14:
+            return err("find: Invalid time unit case. Use lowercase for seconds/minutes/hours (s, m, h) and uppercase for days/weeks/months/years (D, W, M, Y), e.g. 40s, 6m, 8h, 1D, 4W, 3M, 2Y.\n");
         default:
             return EXIT_FAILURE;
     }
@@ -1203,12 +1301,46 @@ int main(int argc, char* argv[]) {
                             cond_type = CONDITION_NAME_CONTAINS;
                         else if (str_equals(argv[i], "endswith"))
                             cond_type = CONDITION_ENDSWITH;
-                        else if (str_equals(argv[i], "ends"))
-                            return help(12);
+                        else if (str_equals(argv[i], "ends")) {
+                            // Separated words: "ends with <str>"
+                            if (++i >= argc || !str_equals(argv[i], "with"))
+                                return help(3);
+                            cond_type = CONDITION_ENDSWITH;
+                        }
                         else if (str_equals(argv[i], "startswith"))
                             cond_type = CONDITION_STARTSWITH;
-                        else if (str_equals(argv[i], "starts"))
-                            return help(13);
+                        else if (str_equals(argv[i], "starts")) {
+                            // Separated words: "starts with <str>"
+                            if (++i >= argc || !str_equals(argv[i], "with"))
+                                return help(3);
+                            cond_type = CONDITION_STARTSWITH;
+                        }
+                        else
+                            return help(4);
+                    }
+                    else if (str_equals(argv[i], "date")) {
+                        if (++i >= argc)
+                            return help(3);
+                        else if (str_equals(argv[i], "olderthan"))
+                            cond_type = CONDITION_OLDERTHAN;
+                        else if (str_equals(argv[i], "newerthan"))
+                            cond_type = CONDITION_NEWERTHAN;
+                        // Separated words: "older than <date>", "newer than <date>"
+                        else if (str_equals(argv[i], "older")) {
+                            if (++i >= argc || !str_equals(argv[i], "than"))
+                                return help(3);
+                            cond_type = CONDITION_OLDERTHAN;
+                        }
+                        else if (str_equals(argv[i], "newer")) {
+                            if (++i >= argc || !str_equals(argv[i], "than"))
+                                return help(3);
+                            cond_type = CONDITION_NEWERTHAN;
+                        }
+                        // Comparative operators: "date > <date>" (newer), "date < <date>" (older)
+                        else if (str_equals(argv[i], ">"))
+                            cond_type = CONDITION_NEWERTHAN;
+                        else if (str_equals(argv[i], "<"))
+                            cond_type = CONDITION_OLDERTHAN;
                         else
                             return help(4);
                     }
@@ -1219,6 +1351,22 @@ int main(int argc, char* argv[]) {
                         else if (str_equals(argv[i], "lessthan"))
                             cond_type = CONDITION_LESSTHAN;
                         else if (str_equals(argv[i], "greaterthan"))
+                            cond_type = CONDITION_GREATERTHAN;
+                        // Separated words: "less than <size>", "greater than <size>"
+                        else if (str_equals(argv[i], "less")) {
+                            if (++i >= argc || !str_equals(argv[i], "than"))
+                                return help(3);
+                            cond_type = CONDITION_LESSTHAN;
+                        }
+                        else if (str_equals(argv[i], "greater")) {
+                            if (++i >= argc || !str_equals(argv[i], "than"))
+                                return help(3);
+                            cond_type = CONDITION_GREATERTHAN;
+                        }
+                        // Comparative operators: "size < <size>" (less), "size > <size>" (greater)
+                        else if (str_equals(argv[i], "<"))
+                            cond_type = CONDITION_LESSTHAN;
+                        else if (str_equals(argv[i], ">"))
                             cond_type = CONDITION_GREATERTHAN;
                         else
                             return help(4);
@@ -1292,98 +1440,93 @@ int main(int argc, char* argv[]) {
                             if (command.type == TYPE_FILES)
                                 cond_type = CONDITION_FILE_CONTAINS;
                             else {
-                            // For folder searches, parse the comparison operator, target count, and count type.
-                            cond_type = CONDITION_FOLDER_CONTAINS;
+                                // For folder searches, parse the comparison operator, target count, and count type.
+                                cond_type = CONDITION_FOLDER_CONTAINS;
 
-                            if (++i >= argc)
-                                return help(3);
-
-                            CompareOp op = CMP_EQ;
-                            const char* tok = argv[i];
-
-                            // Parse comparison operator: can be a separate token (">", ">=") or prefix (">5").
-                            if (str_equals(tok, ">") || str_equals(tok, ">=") ||
-                                str_equals(tok, "<") || str_equals(tok, "<=")) {
-                                if (str_equals(tok, ">"))
-                                    op = CMP_GT;
-                                if (str_equals(tok, ">="))
-                                    op = CMP_GTE;
-                                if (str_equals(tok, "<"))
-                                    op = CMP_LT;
-                                if (str_equals(tok, "<="))
-                                    op = CMP_LTE;
                                 if (++i >= argc)
                                     return help(3);
-                                tok = argv[i];
-                            }
-                            else if (tok[0] == '>' || tok[0] == '<') {
-                                if (tok[1] == '=')
-                                    op = tok[0] == '>' ? CMP_GTE : CMP_LTE;
+
+                                CompareOp op = CMP_EQ;
+                                const char* tok = argv[i];
+
+                                // Parse comparison operator: can be a separate token (">", ">=") or prefix (">5").
+                                if (tok[0] == '>' || tok[0] == '<') {
+                                    char op_char = tok[0];
+
+                                    if (tok[1] == '=') {
+                                        op = op_char == '>' ? CMP_GTE : CMP_LTE;
+                                        tok += 2;
+                                    } else {
+                                        op = op_char == '>' ? CMP_GT : CMP_LT;
+                                        tok += 1;
+                                    }
+
+                                    if (*tok == '\0') {
+                                        if (++i >= argc)
+                                            return help(3);
+                                        tok = argv[i];
+                                    }
+                                }
+                                // Parse the numeric target for the comparison.
+                                char* end;
+                                long target = strtol(tok, &end, 10);
+                                if (end == tok || target < 0 || *end != '\0')
+                                    return help(3);
+
+                                if (++i >= argc)
+                                    return help(3);
+
+                                // Parse what to count: items, files, or folders.
+                                CountWhat what;
+                                if (str_equals(argv[i], "items"))
+                                    what = COUNT_ITEMS;
+                                else if (str_equals(argv[i], "files"))
+                                    what = COUNT_FILES;
+                                else if (str_equals(argv[i], "folders"))
+                                    what = COUNT_FOLDERS;
                                 else
-                                    op = tok[0] == '>' ? CMP_GT : CMP_LT;
-                                tok += (tok[1] == '=') ? 2 : 1;
-                            }
+                                    return help(4);
 
-                            // Parse the numeric target for the comparison.
-                            char* end;
-                            long target = strtol(tok, &end, 10);
-                            if (end == tok || target < 0 || *end != '\0')
-                                return help(3);
+                                // Optional "shallow" flag to disable recursion when counting.
+                                bool shallow = false;
+                                if (i + 1 < argc && str_equals(argv[i + 1], "shallow")) {
+                                    shallow = true;
+                                    i++;
+                                }
 
-                            if (++i >= argc)
-                                return help(3);
+                                cond_value = NULL;
+                                contains_keyword = false;
 
-                            // Parse what to count: items, files, or folders.
-                            CountWhat what;
-                            if (str_equals(argv[i], "items"))
-                                what = COUNT_ITEMS;
-                            else if (str_equals(argv[i], "files"))
-                                what = COUNT_FILES;
-                            else if (str_equals(argv[i], "folders"))
-                                what = COUNT_FOLDERS;
-                            else
-                                return help(4);
+                                // Add the folder contains condition directly since it has a complex structure.
+                                AddCondition(&command.conditions, (Condition){
+                                    .type = CONDITION_FOLDER_CONTAINS,
+                                    .value = NULL,
+                                    .negated = negated,
+                                    .logic_op = next_op,
+                                    .compare_op = op,
+                                    .count_target = target,
+                                    .count_what = what,
+                                    .count_shallow = shallow,
+                                });
 
-                            // Optional "shallow" flag to disable recursion when counting.
-                            bool shallow = false;
-                            if (i + 1 < argc && str_equals(argv[i + 1], "shallow")) {
-                                shallow = true;
-                                i++;
-                            }
-
-                            cond_value = NULL;
-                            contains_keyword = false;
-
-                            // Add the folder contains condition directly since it has a complex structure.
-                            AddCondition(&command.conditions, (Condition){
-                                .type = CONDITION_FOLDER_CONTAINS,
-                                .value = NULL,
-                                .negated = negated,
-                                .logic_op = next_op,
-                                .compare_op = op,
-                                .count_target = target,
-                                .count_what = what,
-                                .count_shallow = shallow,
-                            });
-
-                            if (++i >= argc) {
-                                state = STATE_DONE;
-                                break;
-                            }
-                            else if (str_equals(argv[i], "and")) {
-                                next_op = LOGIC_AND;
-                                continue;
-                            }
-                            else if (str_equals(argv[i], "or")) {
-                                next_op = LOGIC_OR;
-                                continue;
-                            }
-                            else if (str_equals(argv[i], "then")) {
-                                state = STATE_ACTION;
-                                break;
-                            }
-                            else
-                                return help(5);
+                                if (++i >= argc) {
+                                    state = STATE_DONE;
+                                    break;
+                                }
+                                else if (str_equals(argv[i], "and")) {
+                                    next_op = LOGIC_AND;
+                                    continue;
+                                }
+                                else if (str_equals(argv[i], "or")) {
+                                    next_op = LOGIC_OR;
+                                    continue;
+                                }
+                                else if (str_equals(argv[i], "then")) {
+                                    state = STATE_ACTION;
+                                    break;
+                                }
+                                else
+                                    return help(5);
                             }
                         }
                     }
@@ -1394,6 +1537,13 @@ int main(int argc, char* argv[]) {
                             return help(3);
                         else
                             cond_value = argv[i];
+
+                        // Validate date values up front so the user gets one clear
+                        // help message instead of a silent no-match (or per-file spam).
+                        if (cond_type == CONDITION_OLDERTHAN || cond_type == CONDITION_NEWERTHAN) {
+                            if (parse_date(cond_value) == (time_t)-2)
+                                return help(14);
+                        }
                     }
 
                     AddCondition(&command.conditions, (Condition){
