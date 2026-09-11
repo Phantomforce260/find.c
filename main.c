@@ -120,7 +120,8 @@ typedef struct {
     bool include_visible;
 } FindCommand;
 
-#define TIME_ERROR (time_t)-1
+#define TIME_ERROR ((time_t)-1)
+#define TIME_CANON_ERROR ((time_t)-2)
 
 // ================================================================================================
 // Function Headers
@@ -151,6 +152,10 @@ bool endswith(const char *str, const char *suffix) {
     size_t str_len = strlen(str);
     size_t suffix_len = strlen(suffix);
     return (suffix_len <= str_len) && strcmp(str + str_len - suffix_len, suffix) == 0;
+}
+
+bool folder_pointer(const char* str) {
+    return str_equals(str, ".") || str_equals(str, "..");
 }
 
 // ================================================================================================
@@ -268,7 +273,7 @@ static long long byte_count(const char* path) {
 
         // Sum each item in the folder, excluding "." and ".."
         while ((entry = readdir(dir)) != NULL) {
-            if (str_equals(entry->d_name, ".") || str_equals(entry->d_name, ".."))
+            if (folder_pointer(entry->d_name))
                 continue;
 
             char child_path[PATH_MAX];
@@ -360,13 +365,12 @@ static time_t parse_date(const char* str) {
     if (strchr(str, '.') != NULL) {
         int mm = 0, dd = 0, yy = 0;
 
-        // (time_t)-1 is a sentinel for a conversion error.
-        // Functions that receive this value should error.
-        if (sscanf(str, "%d.%d.%d", &mm, &dd, &yy) != 3)
-            return (time_t)-1;
-
-        if (mm < 1 || mm > 12 || dd < 1 || dd > 31 || yy < 0 || yy > 99)
-            return (time_t)-1;
+        if (
+            // MM.DD.YY could not be parsed properly
+            sscanf(str, "%d.%d.%d", &mm, &dd, &yy) != 3 ||
+            // Times are not within valid ranges
+            (mm < 1 || mm > 12 || dd < 1 || dd > 31 || yy < 0 || yy > 99)
+        ) return TIME_ERROR;
 
         struct tm tm;
         memset(&tm, 0, sizeof(tm));
@@ -381,14 +385,14 @@ static time_t parse_date(const char* str) {
     char* end;
     double value = strtod(str, &end);
     if (end == str)
-        return (time_t)-1;
+        return TIME_ERROR;
 
     while (isspace((unsigned char)*end))
         end++;
 
     char unit = *end;
     if (unit == '\0')
-        return (time_t)-1;
+        return TIME_ERROR;
 
     // Accept both the documented cases and their lowercase/uppercase variants
     // (e.g. "S", "H", "d", "y"), but flag exact-case mismatches so the caller
@@ -402,30 +406,30 @@ static time_t parse_date(const char* str) {
         case 'w': case 'W': canonical = 'W'; break;
         case 'M': canonical = 'M'; break;
         case 'y': case 'Y': canonical = 'Y'; break;
-        default: return (time_t)-1;
+        default: return TIME_ERROR;
     }
 
     if (unit != canonical)
-        return (time_t)-2; // wrong-case unit
+        return TIME_CANON_ERROR; // wrong-case unit
 
     time_t now = time(NULL);
     time_t multiplier;
     switch (unit) {
-        case 's': multiplier = 1;               break; // seconds
-        case 'm': multiplier = 60;              break; // minutes
-        case 'h': multiplier = 60 * 60;         break; // hours
-        case 'D': multiplier = 24 * 60 * 60;    break; // days
-        case 'W': multiplier = 7 * 24 * 60 * 60; break; // weeks
-        case 'M': multiplier = 30 * 24 * 60 * 60; break; // months (approx 30 days)
+        case 's': multiplier = 1;                  break; // seconds
+        case 'm': multiplier = 60;                 break; // minutes
+        case 'h': multiplier = 60 * 60;            break; // hours
+        case 'D': multiplier = 24 * 60 * 60;       break; // days
+        case 'W': multiplier = 7 * 24 * 60 * 60;   break; // weeks
+        case 'M': multiplier = 30 * 24 * 60 * 60;  break; // months (approx 30 days)
         case 'Y': multiplier = 365 * 24 * 60 * 60; break; // years (approx 365 days)
-        default: return (time_t)-1;
+        default: return TIME_ERROR;
     }
 
     end++;
     while (isspace((unsigned char)*end))
         end++;
     if (*end != '\0')
-        return (time_t)-1;
+        return TIME_ERROR;
 
     return now - (time_t)(value * multiplier);
 }
@@ -717,7 +721,7 @@ static long count_directory(const char* path, CountWhat what, bool shallow, bool
 
     while ((entry = readdir(dir)) != NULL) {
         // Skip "." and ".."
-        if (str_equals(entry->d_name, ".") || str_equals(entry->d_name, ".."))
+        if (folder_pointer(entry->d_name))
             continue;
 
         // Filter by visibility.
@@ -735,15 +739,9 @@ static long count_directory(const char* path, CountWhat what, bool shallow, bool
         // Evaluate the match based on the CountWhat value.
         bool match = false;
         switch (what) {
-            case COUNT_ITEMS:
-                match = true;
-                break;
-            case COUNT_FILES:
-                match = S_ISREG(st.st_mode);
-                break;
-            case COUNT_FOLDERS:
-                match = S_ISDIR(st.st_mode);
-                break;
+            case COUNT_ITEMS:   match = true;                break;
+            case COUNT_FILES:   match = S_ISREG(st.st_mode); break;
+            case COUNT_FOLDERS: match = S_ISDIR(st.st_mode); break;
         }
 
         // If our match is successful, increment our count.
@@ -762,18 +760,12 @@ static long count_directory(const char* path, CountWhat what, bool shallow, bool
 // Returns true if actual {op} target.
 static bool match_count(long actual, CompareOp op, long target) {
     switch (op) {
-        case CMP_EQ:
-            return actual == target;
-        case CMP_GT:
-            return actual > target;
-        case CMP_GTE:
-            return actual >= target;
-        case CMP_LT:
-            return actual < target;
-        case CMP_LTE:
-            return actual <= target;
-        default:
-            return false;
+        case CMP_EQ:  return actual == target;
+        case CMP_GT:  return actual > target;
+        case CMP_GTE: return actual >= target;
+        case CMP_LT:  return actual < target;
+        case CMP_LTE: return actual <= target;
+        default:      return false;
     }
 }
 
@@ -787,47 +779,25 @@ static bool eval_condition(const char* fullpath, const char* name, const Conditi
     bool met = false;
 
     switch (cond->type) {
-        case CONDITION_NONE:
-            met = true;
-            break;
-        case CONDITION_NAME_CONTAINS:
-            met = strstr(name, cond->value) != NULL;
-            break;
-        case CONDITION_STARTSWITH:
-            met = startswith(name, cond->value);
-            break;
-        case CONDITION_ENDSWITH:
-            met = endswith(name, cond->value);
-            break;
-        case CONDITION_OLDERTHAN:
-        case CONDITION_NEWERTHAN: {
+        case CONDITION_NONE:          met = true; break;
+        case CONDITION_NAME_CONTAINS: met = strstr(name, cond->value) != NULL; break;
+        case CONDITION_STARTSWITH:    met = startswith(name, cond->value);     break;
+        case CONDITION_ENDSWITH:      met = endswith(name, cond->value);       break;
+        case CONDITION_OLDERTHAN: case CONDITION_NEWERTHAN: {
             struct stat st;
             time_t cutoff = parse_date(cond->value);
-            if (cutoff == (time_t)-1 || stat(fullpath, &st) != 0) {
+            if (cutoff == TIME_ERROR || stat(fullpath, &st) != 0) {
                 met = false;
                 break;
             }
             // olderthan: mtime before the cutoff; newerthan: mtime after the cutoff
-            met = (cond->type == CONDITION_OLDERTHAN)
-                ? st.st_mtime < cutoff
-                : st.st_mtime > cutoff;
-            break;
+            met = (cond->type == CONDITION_OLDERTHAN) ? st.st_mtime < cutoff : st.st_mtime > cutoff; break;
         }
-        case CONDITION_GREATERTHAN:
-            met = byte_count(fullpath) > parse_bytes(cond->value);
-            break;
-        case CONDITION_LESSTHAN:
-            met = byte_count(fullpath) < parse_bytes(cond->value);
-            break;
-        case CONDITION_EXECUTABLE:
-            met = is_executable(fullpath);
-            break;
-        case CONDITION_PERM_BITS:
-            met = has_permission(fullpath, cond->value);
-            break;
-        case CONDITION_FILE_CONTAINS:
-            met = file_contains(fullpath, cond->value);
-            break;
+        case CONDITION_GREATERTHAN:   met = byte_count(fullpath) > parse_bytes(cond->value); break;
+        case CONDITION_LESSTHAN:      met = byte_count(fullpath) < parse_bytes(cond->value); break;
+        case CONDITION_EXECUTABLE:    met = is_executable(fullpath);               break;
+        case CONDITION_PERM_BITS:     met = has_permission(fullpath, cond->value); break;
+        case CONDITION_FILE_CONTAINS: met = file_contains(fullpath, cond->value);  break;
         case CONDITION_FOLDER_CONTAINS: {
             met = match_count(
                 count_directory(fullpath, cond->count_what, cond->count_shallow, include_hidden, include_visible),
@@ -867,7 +837,7 @@ static void search_recursive(const char* path, FindCommand* command, StringArray
 
     while ((entry = readdir(dir)) != NULL) {
         // Skip "." and  ".."
-        if (str_equals(entry->d_name, ".") || str_equals(entry->d_name, ".."))
+        if (folder_pointer(entry->d_name))
             continue;
 
         char fullpath[4096];
@@ -884,9 +854,7 @@ static void search_recursive(const char* path, FindCommand* command, StringArray
 
         // Filter by visibility: skip hidden entries if only visible requested, and vice versa.
         bool is_hidden = entry->d_name[0] == '.';
-        if (command->include_hidden && !is_hidden)
-            continue;
-        if (command->include_visible && is_hidden)
+        if ((command->include_hidden && !is_hidden) || (command->include_visible && is_hidden))
             continue;
 
         // If the command has no conditions, it has automatically been met.
@@ -906,11 +874,9 @@ static void search_recursive(const char* path, FindCommand* command, StringArray
 
         // If our condition is met, check the file type. If the file type matches, add to results
         if (condition_met) {
-            if (command->type == TYPE_FILES && S_ISREG(st.st_mode))
-                AddString(results, fullpath);
-            else if (command->type == TYPE_FOLDERS && S_ISDIR(st.st_mode))
-                AddString(results, fullpath);
-            else if (command->type == TYPE_ITEMS && (S_ISREG(st.st_mode) || S_ISDIR(st.st_mode)))
+            if ((command->type == TYPE_FILES && S_ISREG(st.st_mode)) ||
+                (command->type == TYPE_FOLDERS && S_ISDIR(st.st_mode)) ||
+                (command->type == TYPE_ITEMS && (S_ISREG(st.st_mode) || S_ISDIR(st.st_mode))))
                 AddString(results, fullpath);
         }
     }
@@ -1034,10 +1000,8 @@ static int exec_action(FindCommand* command, StringArray* results) {
 
             free(args);
         }
-
         return EXIT_SUCCESS;
     }
-
     return EXIT_SUCCESS;
 }
 
@@ -1091,9 +1055,10 @@ int help(int code) {
                 "                              File contents are at least <pct>% similar to <file>\n"
                 "    size greaterthan <size>   File size greater than <size>\n"
                 "    size lessthan <size>      File size less than <size>\n"
+                "    <size> can be: 100, 10kb, 5mb, 2gb, 1tb\n\n"
+
                 "    perms is <octal>          Permission bits match <octal> (e.g. 644)\n"
                 "    perms exec                File is executable\n\n"
-                "    <size> can be: 100, 10kb, 5mb, 2gb, 1tb\n"
                 "    date olderthan <date>     File was last modified before <date>\n"
                 "    date newerthan <date>     File was last modified after <date>\n"
                 "    <date> can be 40s 6m 8h 1D 4W 3M 2Y or MM.DD.YY\n\n"
@@ -1110,43 +1075,28 @@ int help(int code) {
                 "    find files where name contains .c and perms is 644\n"
                 "    find files where not name endswith .o\n"
                 "    find files where name contains .h then copyto backup/\n"
+                "    find folders hidden in ./cache where perms is 775 then delete"
                 "    find files in src where contents contains TODO then command grep -n {file}\n"
                 "    find files where contents similar 98 to main.c\n"
                 "    find files where contents 0.98 similar to main.c\n"
-                "    find files where name endswith .c or name endswith .h\n"
+                "    find files visible where name endswith .c or name endswith .h\n"
                 "    find files where not name contains .o and name contains main\n"
+                "    find items in .. where date olderthan 08.27.26 or perms exec then delete"
             );
             return EXIT_SUCCESS;
-        case 1:
-            return err("find: <type> must be \"files\", \"folders\", or \"items\".\n");
-        case 2:
-            return err("find: expected a path after \"in\".\n");
-        case 3:
-            return err("find: incomplete or missing condition after \"where\".\n");
-        case 4:
-            return err("find: unknown condition. Expected: name, size, perms, or contents.\n");
-        case 5:
-            return err("find: expected \"then\", \"and\", or \"or\" after condition.\n");
-        case 6:
-            return err("find: expected an action: moveto, copyto, delete, or command.\n");
-        case 7:
-            return err("find: incomplete action. moveto/copyto require a destination, command requires arguments.\n");
-        case 8:
-            return err("find: Unexpected argument after action.\n");
-        case 9:
-            return err("find: \"contents contains\" is not valid with type \"items\".\n");
-        case 10:
-            return err("find: \"contents similar\" is only valid with type \"files\".\n");
-        case 11:
-            return err("find: \"hidden\" and \"visible\" cannot be used together (find searches both by default). \n");
-        case 12:
-            return err("find: Invalid \"end\" (did you mean \"endswith\")?");
-        case 13:
-            return err("find: Invalid \"starts\" (did you mean \"startswith\")?");
-        case 14:
-            return err("find: Invalid time unit case. Use lowercase for seconds/minutes/hours (s, m, h) and uppercase for days/weeks/months/years (D, W, M, Y), e.g. 40s, 6m, 8h, 1D, 4W, 3M, 2Y.\n");
-        default:
-            return EXIT_FAILURE;
+        case 1:  return err("find: <type> must be \"files\", \"folders\", or \"items\".\n");
+        case 2:  return err("find: expected a path after \"in\".\n");
+        case 3:  return err("find: incomplete or missing condition after \"where\".\n");
+        case 4:  return err("find: unknown condition. Expected: name, size, perms, or contents.\n");
+        case 5:  return err("find: expected \"then\", \"and\", or \"or\" after condition.\n");
+        case 6:  return err("find: expected an action: moveto, copyto, delete, or command.\n");
+        case 7:  return err("find: incomplete action. moveto/copyto require a destination, command requires arguments.\n");
+        case 8:  return err("find: Unexpected argument after action.\n");
+        case 9:  return err("find: \"contents contains\" is not valid with type \"items\".\n");
+        case 10: return err("find: \"contents similar\" is only valid with type \"files\".\n");
+        case 11: return err("find: \"hidden\" and \"visible\" cannot be used together (find searches both by default). \n");
+        case 12: return err("find: Invalid time unit case. Use lowercase for seconds/minutes/hours (s, m, h) and uppercase for days/weeks/months/years (D, W, M, Y), e.g. 40s, 6m, 8h, 1D, 4W, 3M, 2Y.\n");
+        default: return EXIT_FAILURE;
     }
 }
 
@@ -1541,8 +1491,8 @@ int main(int argc, char* argv[]) {
                         // Validate date values up front so the user gets one clear
                         // help message instead of a silent no-match (or per-file spam).
                         if (cond_type == CONDITION_OLDERTHAN || cond_type == CONDITION_NEWERTHAN) {
-                            if (parse_date(cond_value) == (time_t)-2)
-                                return help(14);
+                            if (parse_date(cond_value) == TIME_CANON_ERROR)
+                                return help(12);
                         }
                     }
 
