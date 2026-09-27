@@ -18,11 +18,7 @@
 // Enums
 // ================================================================================================
 
-typedef enum {
-    TYPE_FILES,
-    TYPE_FOLDERS,
-    TYPE_ITEMS
-} EntryType;
+typedef enum { TYPE_FILES, TYPE_FOLDERS, TYPE_ITEMS } EntryType;
 
 typedef enum {
     CONDITION_NONE,
@@ -42,24 +38,11 @@ typedef enum {
     CONDITION_NEWERTHAN
 } ConditionType;
 
-typedef enum {
-    CMP_EQ,
-    CMP_GT,
-    CMP_GTE,
-    CMP_LT,
-    CMP_LTE,
-} CompareOp;
+typedef enum { CMP_EQ, CMP_GT, CMP_GTE, CMP_LT, CMP_LTE } CompareOp;
 
-typedef enum {
-    LOGIC_AND,
-    LOGIC_OR,
-} LogicOp;
+typedef enum { LOGIC_AND, LOGIC_OR } LogicOp;
 
-typedef enum {
-    COUNT_ITEMS,
-    COUNT_FILES,
-    COUNT_FOLDERS,
-} CountWhat;
+typedef enum { COUNT_ITEMS, COUNT_FILES, COUNT_FOLDERS } CountWhat;
 
 typedef enum {
     ACTION_PRINT,
@@ -151,7 +134,7 @@ bool startswith(const char *str, const char *prefix) {
 bool endswith(const char *str, const char *suffix) {
     size_t str_len = strlen(str);
     size_t suffix_len = strlen(suffix);
-    return (suffix_len <= str_len) && strcmp(str + str_len - suffix_len, suffix) == 0;
+    return (suffix_len <= str_len) && str_equals(str + str_len - suffix_len, suffix);
 }
 
 bool folder_pointer(const char* str) {
@@ -174,18 +157,15 @@ void AddString(StringArray* array, const char* string) {
             puts("Error: Could not expand StringArray!");
             exit(EXIT_FAILURE);
         }
-
         array->items = new_items;
         array->capacity = new_capacity;
     }
-
     array->items[array->count] = strdup(string);
 
     if (!array->items[array->count]) {
         puts("Error: Could not duplicate input string!");
         exit(EXIT_FAILURE);
     }
-
     array->count++;
 }
 
@@ -195,7 +175,6 @@ void FreeList(StringArray* array) {
         free(array->items[i]);
 
     free(array->items);
-
     array->items = NULL;
     array->count = 0;
     array->capacity = 0;
@@ -212,11 +191,9 @@ void AddCondition(ConditionArray* array, Condition cond) {
             puts("Error: Could not expand ConditionArray!");
             exit(EXIT_FAILURE);
         }
-
         array->items = new_items;
         array->capacity = new_capacity;
     }
-
     if (cond.value)
         cond.value = strdup(cond.value);
 
@@ -235,7 +212,6 @@ void FreeConditions(ConditionArray* array) {
     }
 
     free(array->items);
-
     array->items = NULL;
     array->count = 0;
     array->capacity = 0;
@@ -253,10 +229,8 @@ void FreeConditions(ConditionArray* array) {
  * Special files are not counted. */
 static long long byte_count(const char* path) {
     struct stat st;
-
     // Check if file exists
-    if (stat(path, &st) != 0)
-        return -1;
+    if (stat(path, &st) != 0) return -1;
 
     // If file, return file size
     if (S_ISREG(st.st_mode))
@@ -265,16 +239,14 @@ static long long byte_count(const char* path) {
     // If directory, open and search contents
     if (S_ISDIR(st.st_mode)) {
         DIR* dir = opendir(path);
-        if (!dir)
-            return -1;
+        if (!dir) return -1;
 
         long long total = 0;
         struct dirent* entry;
 
         // Sum each item in the folder, excluding "." and ".."
         while ((entry = readdir(dir)) != NULL) {
-            if (folder_pointer(entry->d_name))
-                continue;
+            if (folder_pointer(entry->d_name)) continue;
 
             char child_path[PATH_MAX];
             snprintf(child_path, sizeof(child_path), "%s/%s", path, entry->d_name);
@@ -286,14 +258,11 @@ static long long byte_count(const char* path) {
                 closedir(dir);
                 return -1;
             }
-
             total += size;
         }
-
         closedir(dir);
         return total;
     }
-
     // Unsupported type (e.g. symbolic link, device, socket)
     return -1;
 }
@@ -311,8 +280,7 @@ static long long parse_bytes(const char* str) {
     value = strtod(str, &end);
 
     // If number could not be found
-    if (end == str)
-        return -1;
+    if (end == str) return -1;
 
     // Skip whitespace between number and unit
     while (isspace((unsigned char)* end))
@@ -330,8 +298,7 @@ static long long parse_bytes(const char* str) {
     while (isspace((unsigned char)* end))
         end++;
 
-    if (*end != '\0')
-        return -1;
+    if (*end != '\0') return -1;
 
     if (str_equals(unit, "b"))
         multiplier = 1;
@@ -345,9 +312,8 @@ static long long parse_bytes(const char* str) {
         multiplier = 1024LL * 1024 * 1024 * 1024;
     else if (unit[0] == '\0')
         multiplier = 1;
-    else
-        // Unknown unit
-        return -1;
+    // Unknown unit
+    else return -1;
 
     return (long long)(value * multiplier);
 }
@@ -384,15 +350,13 @@ static time_t parse_date(const char* str) {
     // Relative duration like "40s", "6m", "8h", "1D", "4W", "3M", "2Y"
     char* end;
     double value = strtod(str, &end);
-    if (end == str)
-        return TIME_ERROR;
+    if (end == str) return TIME_ERROR;
 
     while (isspace((unsigned char)*end))
         end++;
 
     char unit = *end;
-    if (unit == '\0')
-        return TIME_ERROR;
+    if (unit == '\0') return TIME_ERROR;
 
     // Accept both the documented cases and their lowercase/uppercase variants
     // (e.g. "S", "H", "d", "y"), but flag exact-case mismatches so the caller
@@ -409,8 +373,8 @@ static time_t parse_date(const char* str) {
         default: return TIME_ERROR;
     }
 
-    if (unit != canonical)
-        return TIME_CANON_ERROR; // wrong-case unit
+    // wrong-case unit
+    if (unit != canonical) return TIME_CANON_ERROR;
 
     time_t now = time(NULL);
     time_t multiplier;
@@ -425,12 +389,10 @@ static time_t parse_date(const char* str) {
         default: return TIME_ERROR;
     }
 
-    end++;
-    while (isspace((unsigned char)*end))
-        end++;
-    if (*end != '\0')
-        return TIME_ERROR;
+    do end++; 
+    while (isspace((unsigned char)*end));
 
+    if (*end != '\0') return TIME_ERROR;
     return now - (time_t)(value * multiplier);
 }
 
@@ -477,8 +439,7 @@ static const char* basename(const char* path) {
  * and contains the exact substring of the needle. */
 static bool file_contains(const char* path, const char* needle) {
     FILE* f = fopen(path, "rb");
-    if (!f)
-        return false;
+    if (!f) return false;
 
     fseek(f, 0, SEEK_END);
     long file_size = ftell(f);
@@ -515,24 +476,16 @@ static double parse_similarity(const char* str) {
     char* end;
     double value = strtod(str, &end);
 
-    if (end == str)
-        return -1.0;
+    if (end == str) return -1.0;
 
     // Allow an optional trailing '%'
     if (*end == '%')
         end++;
 
-    if (*end != '\0')
-        return -1.0;
+    if (*end != '\0') return -1.0;
 
-    // Values above 1 are treated as percentages
-    if (value > 1.0)
-        value /= 100.0;
-
-    if (value <= 0.0 || value > 1.0)
-        return -1.0;
-
-    return value;
+    // Values above 1 are treated as percentages.
+    return ((value > 1.0 ? (value /= 100.0) : value), (value > 0.0 && value <= 1.0 ? value : -1.0));
 }
 
 /* read_file_bytes:
@@ -542,8 +495,7 @@ static double parse_similarity(const char* str) {
  * Reads an entire file into a malloc'd buffer. Returns NULL on failure. */
 static unsigned char* read_file_bytes(const char* path, size_t* out_size) {
     FILE* f = fopen(path, "rb");
-    if (!f)
-        return NULL;
+    if (!f) return NULL;
 
     fseek(f, 0, SEEK_END);
     long file_size = ftell(f);
@@ -599,10 +551,8 @@ static double file_similarity(const char* path1, const char* path2) {
         if (buf1[i] == buf2[i])
             matching++;
     }
-
     free(buf1);
     free(buf2);
-
     return (double)matching / (double)max_size;
 }
 
@@ -614,8 +564,7 @@ static double file_similarity(const char* path1, const char* path2) {
 static bool copy_file(const char* src, const char* dest) {
     // Open src in read mode
     FILE* in = fopen(src, "rb");
-    if (!in)
-        return false;
+    if (!in) return false;
 
     // Open dest in write mode. Creates the file if it does not exist.
     FILE* out = fopen(dest, "wb");
@@ -627,7 +576,6 @@ static bool copy_file(const char* src, const char* dest) {
     char buf[8192];
     size_t n;
     bool ok = true;
-
     // Copy the contents of src to dest.
     while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
         if (fwrite(buf, 1, n, out) != n) {
@@ -635,7 +583,6 @@ static bool copy_file(const char* src, const char* dest) {
             break;
         }
     }
-
     fclose(in);
     fclose(out);
     return ok;
@@ -665,7 +612,6 @@ StringArray search(FindCommand* command) {
             search_recursive(command->paths.items[i], command, &results);
         }
     }
-
     FreeList(&searched);
     return results;
 }
@@ -679,26 +625,22 @@ static bool path_covered(StringArray* paths, const char* path) {
 
     // Check if the input path exists
     char resolved[PATH_MAX];
-    if (!realpath(path, resolved))
-        return false;
+    if (!realpath(path, resolved)) return false;
 
     for (size_t i = 0; i < paths->count; i++) {
         // Skip unreachable paths in the array.
         char existing[PATH_MAX];
-        if (!realpath(paths->items[i], existing))
-            continue;
+        if (!realpath(paths->items[i], existing)) continue;
 
         // Is the current path == our input path?
-        if (str_equals(existing, resolved))
-            return true;
+        if (str_equals(existing, resolved)) return true;
 
         // If not, strip any trailing "/" and strip the absolute name. Are the paths the same then?
         size_t elen = strlen(existing);
         if (elen > 0 && existing[elen - 1] == '/')
             elen--;
 
-        if (strncmp(resolved, existing, elen) == 0 && resolved[elen] == '/')
-            return true;
+        if (strncmp(resolved, existing, elen) == 0 && resolved[elen] == '/') return true;
     }
     return false;
 }
@@ -710,31 +652,26 @@ static bool path_covered(StringArray* paths, const char* path) {
  *
  * Counts the number of items in the given directory with the given parameters. */
 static long count_directory(const char* path, CountWhat what, bool shallow, bool include_hidden, bool include_visible) {
-
     // Open folder and read contents
     DIR* dir = opendir(path);
-    if (!dir)
-        return 0;
+    if (!dir) return 0;
 
     long count = 0;
     struct dirent* entry;
 
     while ((entry = readdir(dir)) != NULL) {
         // Skip "." and ".."
-        if (folder_pointer(entry->d_name))
-            continue;
+        if (folder_pointer(entry->d_name)) continue;
 
         // Filter by visibility.
         bool is_hidden = entry->d_name[0] == '.';
-        if ((include_hidden && !is_hidden) || (include_visible && is_hidden))
-            continue;
+        if ((include_hidden && !is_hidden) || (include_visible && is_hidden)) continue;
 
         char fullpath[4096];
         snprintf(fullpath, sizeof(fullpath), "%s/%s", path, entry->d_name);
 
         struct stat st;
-        if (lstat(fullpath, &st) != 0)
-            continue;
+        if (lstat(fullpath, &st) != 0) continue;
 
         // Evaluate the match based on the CountWhat value.
         bool match = false;
@@ -752,7 +689,6 @@ static long count_directory(const char* path, CountWhat what, bool shallow, bool
         if (!shallow && S_ISDIR(st.st_mode))
             count += count_directory(fullpath, what, shallow, include_hidden, include_visible);
     }
-
     closedir(dir);
     return count;
 }
@@ -830,22 +766,18 @@ static bool eval_condition(const char* fullpath, const char* name, const Conditi
  * and stores the results in the given StringArray. */
 static void search_recursive(const char* path, FindCommand* command, StringArray* results) {
     DIR* dir = opendir(path);
-    if (!dir)
-        return;
+    if (!dir) return;
 
     struct dirent* entry;
-
     while ((entry = readdir(dir)) != NULL) {
         // Skip "." and  ".."
-        if (folder_pointer(entry->d_name))
-            continue;
+        if (folder_pointer(entry->d_name)) continue;
 
         char fullpath[4096];
         snprintf(fullpath, sizeof(fullpath), "%s/%s", path, entry->d_name);
 
         struct stat st;
-        if (lstat(fullpath, &st) != 0)
-            continue;
+        if (lstat(fullpath, &st) != 0) continue;
 
         // Always recurse into subdirectories, regardless of the visibility filter,
         // so hidden files nested inside visible directories are still found.
@@ -854,8 +786,7 @@ static void search_recursive(const char* path, FindCommand* command, StringArray
 
         // Filter by visibility: skip hidden entries if only visible requested, and vice versa.
         bool is_hidden = entry->d_name[0] == '.';
-        if ((command->include_hidden && !is_hidden) || (command->include_visible && is_hidden))
-            continue;
+        if ((command->include_hidden && !is_hidden) || (command->include_visible && is_hidden)) continue;
 
         // If the command has no conditions, it has automatically been met.
         bool condition_met = true;
@@ -863,7 +794,6 @@ static void search_recursive(const char* path, FindCommand* command, StringArray
         // Combine conditions left to right, with no operator precedence.
         for (size_t c = 0; c < command->conditions.count; c++) {
             bool met = eval_condition(fullpath, entry->d_name, &command->conditions.items[c], command->include_hidden, command->include_visible);
-
             if (c == 0)
                 condition_met = met;
             else if (command->conditions.items[c].logic_op == LOGIC_AND)
@@ -889,12 +819,10 @@ static void search_recursive(const char* path, FindCommand* command, StringArray
  *
  * Using the parameters from the FindCommand, execute the given command on the result StringArray. */
 static int exec_action(FindCommand* command, StringArray* results) {
-
     // If the action is to just print:
     if (command->action == ACTION_PRINT || results->count == 0) {
         for (size_t j = 0; j < results->count; j++)
             printf("%s\n", results->items[j]);
-
         return EXIT_SUCCESS;
     }
 
@@ -916,7 +844,6 @@ static int exec_action(FindCommand* command, StringArray* results) {
             if (remove(results->items[j]) != 0)
                 fprintf(stderr, "Failed to delete: %s\n", results->items[j]);
         }
-
         return EXIT_SUCCESS;
     }
 
@@ -977,7 +904,6 @@ static int exec_action(FindCommand* command, StringArray* results) {
                     args[k] = expanded;
                 }
             }
-
             args[command->command_template.count] = NULL;
 
             // Fork a child process and execute the command, waiting for it to finish.
@@ -991,8 +917,7 @@ static int exec_action(FindCommand* command, StringArray* results) {
                 int status;
                 waitpid(pid, &status, 0);
             }
-            else
-                perror("fork");
+            else perror("fork");
 
             // Done! Free the template.
             for (size_t k = 0; k < command->command_template.count; k++)
@@ -1111,8 +1036,7 @@ int help(int code) {
 int main(int argc, char* argv[]) {
 
     // If only binary name passed, display help.
-    if (argc == 1)
-        return help(0);
+    if (argc == 1) return help(0);
 
     int i = 1;
     FindCommand command = {0};
@@ -1131,8 +1055,7 @@ int main(int argc, char* argv[]) {
                     command.type = TYPE_FOLDERS;
                 else if (str_equals(argv[i], "items"))
                     command.type = TYPE_ITEMS;
-                else
-                    return help(1);
+                else return help(1);
 
                 command.recursive = true;
                 i++;
@@ -1155,14 +1078,12 @@ int main(int argc, char* argv[]) {
                     i++;
                 }
                 else if (str_equals(argv[i], "visible")) {
-                    if (command.include_hidden)
-                        return help(11);
+                    if (command.include_hidden) return help(11);
                     command.include_visible = true;
                     i++;
                 }
                 else if (str_equals(argv[i], "hidden")) {
-                    if (command.include_visible)
-                        return help(11);
+                    if (command.include_visible) return help(11);
                     command.include_hidden = true;
                     i++;
                 }
@@ -1176,9 +1097,7 @@ int main(int argc, char* argv[]) {
                     AddString(&command.paths, ".");
                     state = STATE_ACTION;
                 }
-                else
-                    return help(0);
-
+                else return help(0);
                 break;
             }
             /* STATE_PATHS:
@@ -1190,18 +1109,15 @@ int main(int argc, char* argv[]) {
                 i++;
                 // Collect paths until we hit a state keyword or run out of arguments.
                 while (i < argc && !str_equals(argv[i], "where") && !str_equals(argv[i], "then")) {
-
                     // Skip "and" separators between paths (e.g., "in src and lib").
                     if (str_equals(argv[i], "and")) {
                         i++;
                         continue;
                     }
-
                     AddString(&command.paths, argv[i++]);
                 }
 
-                if (command.paths.count == 0)
-                    return help(2);
+                if (command.paths.count == 0) return help(2);
                 else if (i >= argc) {
                     // No conditions or action specified; default to printing results.
                     command.action = ACTION_PRINT;
@@ -1233,20 +1149,17 @@ int main(int argc, char* argv[]) {
                     double similarity_threshold = 0.0;
                     const char* reference_file = NULL;
 
-                    if (++i >= argc)
-                        return help(3);
+                    if (++i >= argc) return help(3);
 
                     // Check for optional "not" negation before the condition.
                     if (str_equals(argv[i], "not")) {
                         negated = true;
-                        if (++i >= argc)
-                            return help(3);
+                        if (++i >= argc) return help(3);
                     }
 
                     // Parse "name" conditions: contains, startswith, endswith.
                     if (str_equals(argv[i], "name")) {
-                        if (++i >= argc)
-                            return help(3);
+                        if (++i >= argc) return help(3);
                         else if (str_equals(argv[i], "contains"))
                             cond_type = CONDITION_NAME_CONTAINS;
                         else if (str_equals(argv[i], "endswith"))
@@ -1265,25 +1178,21 @@ int main(int argc, char* argv[]) {
                                 return help(3);
                             cond_type = CONDITION_STARTSWITH;
                         }
-                        else
-                            return help(4);
+                        else return help(4);
                     }
                     else if (str_equals(argv[i], "date")) {
-                        if (++i >= argc)
-                            return help(3);
+                        if (++i >= argc) return help(3);
                         else if (str_equals(argv[i], "olderthan"))
                             cond_type = CONDITION_OLDERTHAN;
                         else if (str_equals(argv[i], "newerthan"))
                             cond_type = CONDITION_NEWERTHAN;
                         // Separated words: "older than <date>", "newer than <date>"
                         else if (str_equals(argv[i], "older")) {
-                            if (++i >= argc || !str_equals(argv[i], "than"))
-                                return help(3);
+                            if (++i >= argc || !str_equals(argv[i], "than")) return help(3);
                             cond_type = CONDITION_OLDERTHAN;
                         }
                         else if (str_equals(argv[i], "newer")) {
-                            if (++i >= argc || !str_equals(argv[i], "than"))
-                                return help(3);
+                            if (++i >= argc || !str_equals(argv[i], "than")) return help(3);
                             cond_type = CONDITION_NEWERTHAN;
                         }
                         // Comparative operators: "date > <date>" (newer), "date < <date>" (older)
@@ -1291,26 +1200,22 @@ int main(int argc, char* argv[]) {
                             cond_type = CONDITION_NEWERTHAN;
                         else if (str_equals(argv[i], "<"))
                             cond_type = CONDITION_OLDERTHAN;
-                        else
-                            return help(4);
+                        else return help(4);
                     }
                     // Parse "size" conditions: lessthan, greaterthan (uses parse_bytes for units like "5mb").
                     else if (str_equals(argv[i], "size")) {
-                        if (++i >= argc)
-                            return help(3);
+                        if (++i >= argc) return help(3);
                         else if (str_equals(argv[i], "lessthan"))
                             cond_type = CONDITION_LESSTHAN;
                         else if (str_equals(argv[i], "greaterthan"))
                             cond_type = CONDITION_GREATERTHAN;
                         // Separated words: "less than <size>", "greater than <size>"
                         else if (str_equals(argv[i], "less")) {
-                            if (++i >= argc || !str_equals(argv[i], "than"))
-                                return help(3);
+                            if (++i >= argc || !str_equals(argv[i], "than")) return help(3);
                             cond_type = CONDITION_LESSTHAN;
                         }
                         else if (str_equals(argv[i], "greater")) {
-                            if (++i >= argc || !str_equals(argv[i], "than"))
-                                return help(3);
+                            if (++i >= argc || !str_equals(argv[i], "than")) return help(3);
                             cond_type = CONDITION_GREATERTHAN;
                         }
                         // Comparative operators: "size < <size>" (less), "size > <size>" (greater)
@@ -1318,13 +1223,11 @@ int main(int argc, char* argv[]) {
                             cond_type = CONDITION_LESSTHAN;
                         else if (str_equals(argv[i], ">"))
                             cond_type = CONDITION_GREATERTHAN;
-                        else
-                            return help(4);
+                        else return help(4);
                     }
                     // Parse "perms" conditions: exec (executable bit) or is (exact permission bits).
                     else if (str_equals(argv[i], "perms")) {
-                        if (++i >= argc)
-                            return help(3);
+                        if (++i >= argc) return help(3);
                         else if (str_equals(argv[i], "exec")) {
                             // "perms exec" has no value keyword; it just tests the executable bit.
                             cond_type = CONDITION_EXECUTABLE;
@@ -1332,30 +1235,23 @@ int main(int argc, char* argv[]) {
                         }
                         else if (str_equals(argv[i], "is"))
                             cond_type = CONDITION_PERM_BITS;
-                        else
-                            return help(4);
+                        else return help(4);
                     }
                     // Parse "contents" conditions: contains (file content search), similar (file similarity), or folder containment count.
                     else if (str_equals(argv[i], "contents")) {
-                        if (++i >= argc)
-                            return help(3);
+                        if (++i >= argc) return help(3);
                         // "contents similar <pct> to <file>" syntax
                         else if (str_equals(argv[i], "similar")) {
                             // Syntax: contents similar <pct> to <file>
                             // Similarity comparison only valid for file searches.
-                            if (command.type != TYPE_FILES)
-                                return help(10);
-                            if (++i >= argc)
-                                return help(3);
+                            if (command.type != TYPE_FILES) return help(10);
+                            if (++i >= argc) return help(3);
 
                             double pct = parse_similarity(argv[i]);
-                            if (pct < 0.0)
-                                return help(3);
+                            if (pct < 0.0) return help(3);
 
-                            if (++i >= argc || !str_equals(argv[i], "to"))
-                                return help(3);
-                            if (++i >= argc)
-                                return help(3);
+                            if (++i >= argc || !str_equals(argv[i], "to")) return help(3);
+                            if (++i >= argc) return help(3);
 
                             cond_type = CONDITION_CONTENTS_SIMILAR;
                             contains_keyword = false;
@@ -1365,25 +1261,19 @@ int main(int argc, char* argv[]) {
                         else if (!str_equals(argv[i], "contains")) {
                             // Syntax: contents <pct> similar to <file>
                             double pct = parse_similarity(argv[i]);
-                            if (pct < 0.0)
-                                return help(4);
+                            if (pct < 0.0) return help(4);
 
-                            if (command.type != TYPE_FILES)
-                                return help(10);
-                            if (++i >= argc || !str_equals(argv[i], "similar"))
-                                return help(3);
-                            if (++i >= argc || !str_equals(argv[i], "to"))
-                                return help(3);
-                            if (++i >= argc)
-                                return help(3);
+                            if (command.type != TYPE_FILES) return help(10);
+                            if (++i >= argc || !str_equals(argv[i], "similar")) return help(3);
+                            if (++i >= argc || !str_equals(argv[i], "to")) return help(3);
+                            if (++i >= argc) return help(3);
 
                             cond_type = CONDITION_CONTENTS_SIMILAR;
                             contains_keyword = false;
                             similarity_threshold = pct;
                             reference_file = argv[i];
                         }
-                        else if (command.type == TYPE_ITEMS)
-                            return help(9);
+                        else if (command.type == TYPE_ITEMS) return help(9);
 
                         if (cond_type != CONDITION_CONTENTS_SIMILAR) {
                             // For file searches, use substring matching on file contents.
@@ -1392,9 +1282,7 @@ int main(int argc, char* argv[]) {
                             else {
                                 // For folder searches, parse the comparison operator, target count, and count type.
                                 cond_type = CONDITION_FOLDER_CONTAINS;
-
-                                if (++i >= argc)
-                                    return help(3);
+                                if (++i >= argc) return help(3);
 
                                 CompareOp op = CMP_EQ;
                                 const char* tok = argv[i];
@@ -1412,19 +1300,15 @@ int main(int argc, char* argv[]) {
                                     }
 
                                     if (*tok == '\0') {
-                                        if (++i >= argc)
-                                            return help(3);
+                                        if (++i >= argc) return help(3);
                                         tok = argv[i];
                                     }
                                 }
                                 // Parse the numeric target for the comparison.
                                 char* end;
                                 long target = strtol(tok, &end, 10);
-                                if (end == tok || target < 0 || *end != '\0')
-                                    return help(3);
-
-                                if (++i >= argc)
-                                    return help(3);
+                                if (end == tok || target < 0 || *end != '\0') return help(3);
+                                if (++i >= argc) return help(3);
 
                                 // Parse what to count: items, files, or folders.
                                 CountWhat what;
@@ -1434,8 +1318,7 @@ int main(int argc, char* argv[]) {
                                     what = COUNT_FILES;
                                 else if (str_equals(argv[i], "folders"))
                                     what = COUNT_FOLDERS;
-                                else
-                                    return help(4);
+                                else return help(4);
 
                                 // Optional "shallow" flag to disable recursion when counting.
                                 bool shallow = false;
@@ -1475,24 +1358,20 @@ int main(int argc, char* argv[]) {
                                     state = STATE_ACTION;
                                     break;
                                 }
-                                else
-                                    return help(5);
+                                else return help(5);
                             }
                         }
                     }
 
                     // For conditions that require a value keyword (e.g., "name contains <str>").
                     if (contains_keyword) {
-                        if (++i >= argc)
-                            return help(3);
-                        else
-                            cond_value = argv[i];
+                        if (++i >= argc) return help(3);
+                        else cond_value = argv[i];
 
                         // Validate date values up front so the user gets one clear
                         // help message instead of a silent no-match (or per-file spam).
                         if (cond_type == CONDITION_OLDERTHAN || cond_type == CONDITION_NEWERTHAN) {
-                            if (parse_date(cond_value) == TIME_CANON_ERROR)
-                                return help(12);
+                            if (parse_date(cond_value) == TIME_CANON_ERROR) return help(12);
                         }
                     }
 
@@ -1526,10 +1405,8 @@ int main(int argc, char* argv[]) {
                         state = STATE_ACTION;
                         break;
                     }
-                    else
-                        return help(5);
+                    else return help(5);
                 }
-
                 break;
             }
 
@@ -1541,16 +1418,14 @@ int main(int argc, char* argv[]) {
              * command collects all remaining arguments as the command template.
              * delete takes no additional arguments. */
             case STATE_ACTION: {
-                if (++i >= argc)
-                    return help(6);
+                if (++i >= argc) return help(6);
                 else if (str_equals(argv[i], "moveto"))
                     command.action = ACTION_MOVE;
                 else if (str_equals(argv[i], "copyto"))
                     command.action = ACTION_COPY;
                 else if (str_equals(argv[i], "delete")) {
                     command.action = ACTION_DELETE;
-                    if (++i != argc)
-                        return help(5);
+                    if (++i != argc) return help(5);
                     state = STATE_DONE;
                     break;
                 }
@@ -1559,23 +1434,17 @@ int main(int argc, char* argv[]) {
                     i++;
                     while (i < argc)
                         AddString(&command.command_template, argv[i++]);
-                    if (command.command_template.count == 0)
-                        return help(7);
+                    if (command.command_template.count == 0) return help(7);
                     state = STATE_DONE;
                     break;
                 }
-                else
-                    return help(6);
+                else return help(6);
 
-                if (++i >= argc)
-                    return help(7);
-                else
-                    command.action_value = argv[i];
+                if (++i >= argc) return help(7);
+                else command.action_value = argv[i];
 
-                if (++i != argc)
-                    return help(8);
-                else
-                    state = STATE_DONE;
+                if (++i != argc) return help(8);
+                else state = STATE_DONE;
 
                 break;
             }
