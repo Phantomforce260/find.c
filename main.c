@@ -115,6 +115,7 @@ StringArray search(FindCommand* command);
 static bool path_covered(StringArray* paths, const char* path);
 static void search_recursive(const char* path, FindCommand* command, StringArray* results);
 static int exec_action(FindCommand* command, StringArray* results);
+static void join_path(char* dest, size_t size, const char* dir, const char* name);
 
 // ================================================================================================
 // String Helpers
@@ -249,7 +250,7 @@ static long long byte_count(const char* path) {
             if (folder_pointer(entry->d_name)) continue;
 
             char child_path[PATH_MAX];
-            snprintf(child_path, sizeof(child_path), "%s/%s", path, entry->d_name);
+            join_path(child_path, sizeof(child_path), path, entry->d_name);
 
             // Recursively search each item
             long long size = byte_count(child_path);
@@ -431,6 +432,25 @@ static const char* basename(const char* path) {
     return last ? last + 1 : path;
 }
 
+/* join_path:
+ *     - dest: The buffer to write the joined path into.
+ *     - size: The size of the dest buffer.
+ *     - dir: The parent directory.
+ *     - name: The entry name to append to the directory.
+ *
+ * Joins a directory and an entry name with exactly one "/", so a directory that
+ * was given with a trailing slash does not produce a doubled separator. */
+static void join_path(char* dest, size_t size, const char* dir, const char* name) {
+    size_t len = strlen(dir);
+
+    // Keep the root "/" intact, but drop any other trailing separators.
+    while (len > 1 && dir[len - 1] == '/') len--;
+
+    // The root already ends in a separator, so do not add a second one.
+    const char* separator = (len == 1 && dir[0] == '/') ? "" : "/";
+    snprintf(dest, size, "%.*s%s%s", (int)len, dir, separator, name);
+}
+
 /* file_contains:
  *     - path: The path to the file to evaluate.
  *     - needle: The string to check inside the file.
@@ -479,8 +499,7 @@ static double parse_similarity(const char* str) {
     if (end == str) return -1.0;
 
     // Allow an optional trailing '%'
-    if (*end == '%')
-        end++;
+    if (*end == '%') end++;
 
     if (*end != '\0') return -1.0;
 
@@ -668,7 +687,7 @@ static long count_directory(const char* path, CountWhat what, bool shallow, bool
         if ((include_hidden && !is_hidden) || (include_visible && is_hidden)) continue;
 
         char fullpath[4096];
-        snprintf(fullpath, sizeof(fullpath), "%s/%s", path, entry->d_name);
+        join_path(fullpath, sizeof(fullpath), path, entry->d_name);
 
         struct stat st;
         if (lstat(fullpath, &st) != 0) continue;
@@ -774,7 +793,7 @@ static void search_recursive(const char* path, FindCommand* command, StringArray
         if (folder_pointer(entry->d_name)) continue;
 
         char fullpath[4096];
-        snprintf(fullpath, sizeof(fullpath), "%s/%s", path, entry->d_name);
+        join_path(fullpath, sizeof(fullpath), path, entry->d_name);
 
         struct stat st;
         if (lstat(fullpath, &st) != 0) continue;
@@ -854,7 +873,7 @@ static int exec_action(FindCommand* command, StringArray* results) {
         for (size_t j = 0; j < results->count; j++) {
             // Create destination file name.
             char dest[4096];
-            snprintf(dest, sizeof(dest), "%s/%s", command->action_value, basename(results->items[j]));
+            join_path(dest, sizeof(dest), command->action_value, basename(results->items[j]));
 
             // Copy or move to destinatio depending on action.
             bool ok = command->action == ACTION_MOVE
@@ -1012,7 +1031,7 @@ int help(int code) {
         case 1:  return err("find: <type> must be \"files\", \"folders\", or \"items\".\n");
         case 2:  return err("find: expected a path after \"in\".\n");
         case 3:  return err("find: incomplete or missing condition after \"where\".\n");
-        case 4:  return err("find: unknown condition. Expected: name, size, perms, or contents.\n");
+        case 4:  return err("find: unknown condition. Expected: name, size, date, perms, or contents.\n");
         case 5:  return err("find: expected \"then\", \"and\", or \"or\" after condition.\n");
         case 6:  return err("find: expected an action: moveto, copyto, delete, or command.\n");
         case 7:  return err("find: incomplete action. moveto/copyto require a destination, command requires arguments.\n");
@@ -1362,6 +1381,7 @@ int main(int argc, char* argv[]) {
                             }
                         }
                     }
+                    else return help(4);
 
                     // For conditions that require a value keyword (e.g., "name contains <str>").
                     if (contains_keyword) {

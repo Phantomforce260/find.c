@@ -1,6 +1,5 @@
-# Test Folders
-test*
-
 # Binary name
 find
 cfind
+
+.ruby-lsp
