@@ -2,6 +2,9 @@
 // Headers
 // ================================================================================================
 
+#include <errno.h>
+#include <stddef.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -110,12 +113,8 @@ typedef struct {
 // Function Headers
 // ================================================================================================
 
-StringArray search(FindCommand* command);
-
 static bool path_covered(StringArray* paths, const char* path);
 static void search_recursive(const char* path, FindCommand* command, StringArray* results);
-static int exec_action(FindCommand* command, StringArray* results);
-static void join_path(char* dest, size_t size, const char* dir, const char* name);
 
 // ================================================================================================
 // String Helpers
@@ -133,14 +132,40 @@ bool startswith(const char *str, const char *prefix) {
 
 // endswith: returns true if str ends with suffix.
 bool endswith(const char *str, const char *suffix) {
-    size_t str_len = strlen(str);
-    size_t suffix_len = strlen(suffix);
+    const size_t str_len = strlen(str);
+    const size_t suffix_len = strlen(suffix);
     return (suffix_len <= str_len) && str_equals(str + str_len - suffix_len, suffix);
 }
 
 bool folder_pointer(const char* str) {
     return str_equals(str, ".") || str_equals(str, "..");
 }
+
+// basename: returns the name of the file/folder with the parent path stripped out.
+const char* basename(const char* path) {
+    const char* last = strrchr(path, '/');
+    return last ? last + 1 : path;
+}
+
+/* join_path:
+ *     - dest: The buffer to write the joined path into.
+ *     - size: The size of the dest buffer.
+ *     - dir: The parent directory.
+ *     - name: The entry name to append to the directory.
+ *
+ * Joins a directory and an entry name with exactly one "/", so a directory that
+ * was given with a trailing slash does not produce a doubled separator. */
+void join_path(char* dest, size_t size, const char* dir, const char* name) {
+    size_t len = strlen(dir);
+
+    // Keep the root "/" intact, but drop any other trailing separators.
+    while (len > 1 && dir[len - 1] == '/') len--;
+
+    // The root already ends in a separator, so do not add a second one.
+    const char* separator = (len == 1 && dir[0] == '/') ? "" : "/";
+    snprintf(dest, size, "%.*s%s%s", (int)len, dir, separator, name);
+}
+
 
 // ================================================================================================
 // Array Helpers
@@ -234,8 +259,7 @@ static long long byte_count(const char* path) {
     if (stat(path, &st) != 0) return -1;
 
     // If file, return file size
-    if (S_ISREG(st.st_mode))
-        return (long long)st.st_size;
+    if (S_ISREG(st.st_mode)) return (long long)st.st_size;
 
     // If directory, open and search contents
     if (S_ISDIR(st.st_mode)) {
@@ -296,8 +320,7 @@ static long long parse_bytes(const char* str) {
     }
 
     // Make sure there is nothing after the unit
-    while (isspace((unsigned char)* end))
-        end++;
+    while (isspace((unsigned char)* end)) end++;
 
     if (*end != '\0') return -1;
 
@@ -317,84 +340,6 @@ static long long parse_bytes(const char* str) {
     else return -1;
 
     return (long long)(value * multiplier);
-}
-
-/* parse_date:
- *     - str: The date to parse.
- *
- * Converts a date string to a time_t reference point.
- * Supports relative durations like "40s", "6m", "8h", "1D", "4W", "3M", "2Y"
- * (measured backward from now), or an absolute date like "MM.DD.YY".
- * The returned time represents the cutoff: files modified after it are newer,
- * files modified before it are older. */
-static time_t parse_date(const char* str) {
-    // Absolute date "MM.DD.YY"
-    if (strchr(str, '.') != NULL) {
-        int mm = 0, dd = 0, yy = 0;
-
-        if (
-            // MM.DD.YY could not be parsed properly
-            sscanf(str, "%d.%d.%d", &mm, &dd, &yy) != 3 ||
-            // Times are not within valid ranges
-            (mm < 1 || mm > 12 || dd < 1 || dd > 31 || yy < 0 || yy > 99)
-        ) return TIME_ERROR;
-
-        struct tm tm;
-        memset(&tm, 0, sizeof(tm));
-        tm.tm_year = (yy >= 70 ? yy : 100 + yy); // 70-99 -> 1970-1999, 00-69 -> 2000-2069
-        tm.tm_mon = mm - 1;
-        tm.tm_mday = dd;
-        tm.tm_isdst = -1;
-        return mktime(&tm);
-    }
-
-    // Relative duration like "40s", "6m", "8h", "1D", "4W", "3M", "2Y"
-    char* end;
-    double value = strtod(str, &end);
-    if (end == str) return TIME_ERROR;
-
-    while (isspace((unsigned char)*end))
-        end++;
-
-    char unit = *end;
-    if (unit == '\0') return TIME_ERROR;
-
-    // Accept both the documented cases and their lowercase/uppercase variants
-    // (e.g. "S", "H", "d", "y"), but flag exact-case mismatches so the caller
-    // can alert the user. The canonical forms are: s m h D W M Y.
-    char canonical;
-    switch (unit) {
-        case 's': case 'S': canonical = 's'; break;
-        case 'm': canonical = 'm'; break;
-        case 'h': case 'H': canonical = 'h'; break;
-        case 'd': case 'D': canonical = 'D'; break;
-        case 'w': case 'W': canonical = 'W'; break;
-        case 'M': canonical = 'M'; break;
-        case 'y': case 'Y': canonical = 'Y'; break;
-        default: return TIME_ERROR;
-    }
-
-    // wrong-case unit
-    if (unit != canonical) return TIME_CANON_ERROR;
-
-    time_t now = time(NULL);
-    time_t multiplier;
-    switch (unit) {
-        case 's': multiplier = 1;                  break; // seconds
-        case 'm': multiplier = 60;                 break; // minutes
-        case 'h': multiplier = 60 * 60;            break; // hours
-        case 'D': multiplier = 24 * 60 * 60;       break; // days
-        case 'W': multiplier = 7 * 24 * 60 * 60;   break; // weeks
-        case 'M': multiplier = 30 * 24 * 60 * 60;  break; // months (approx 30 days)
-        case 'Y': multiplier = 365 * 24 * 60 * 60; break; // years (approx 365 days)
-        default: return TIME_ERROR;
-    }
-
-    do end++; 
-    while (isspace((unsigned char)*end));
-
-    if (*end != '\0') return TIME_ERROR;
-    return now - (time_t)(value * multiplier);
 }
 
 // is_executable: returns true if a path is executable (+x bit)
@@ -424,31 +369,6 @@ static bool has_permission(const char* path, char* permissions) {
     ) && 
     // permission bits are equal
     (st.st_mode & 0777) == (mode & 0777);
-}
-
-// basename: returns the name of the file/folder with the parent path stripped out.
-static const char* basename(const char* path) {
-    const char* last = strrchr(path, '/');
-    return last ? last + 1 : path;
-}
-
-/* join_path:
- *     - dest: The buffer to write the joined path into.
- *     - size: The size of the dest buffer.
- *     - dir: The parent directory.
- *     - name: The entry name to append to the directory.
- *
- * Joins a directory and an entry name with exactly one "/", so a directory that
- * was given with a trailing slash does not produce a doubled separator. */
-static void join_path(char* dest, size_t size, const char* dir, const char* name) {
-    size_t len = strlen(dir);
-
-    // Keep the root "/" intact, but drop any other trailing separators.
-    while (len > 1 && dir[len - 1] == '/') len--;
-
-    // The root already ends in a separator, so do not add a second one.
-    const char* separator = (len == 1 && dir[0] == '/') ? "" : "/";
-    snprintf(dest, size, "%.*s%s%s", (int)len, dir, separator, name);
 }
 
 /* file_contains:
@@ -567,20 +487,21 @@ static double file_similarity(const char* path1, const char* path2) {
 
     size_t matching = 0;
     for (size_t i = 0; i < min_size; i++) {
-        if (buf1[i] == buf2[i])
-            matching++;
+        if (buf1[i] == buf2[i]) matching++;
     }
     free(buf1);
     free(buf2);
     return (double)matching / (double)max_size;
 }
 
-/* copy_file:
+/* copy_file_data:
  *     - src: The source file to copy.
  *     - dest: The destination to copy to.
+ *     - st: stat of src (from lstat, used for mode + timestamps).
  *
- * Copies a file from src to dest. Assumes that src and dest are absolute paths. */
-static bool copy_file(const char* src, const char* dest) {
+ * Copies regular file contents from src to dest, preserving mode and
+ * atime/mtime. Returns true on success. */
+static bool copy_file_data(const char* src, const char* dest, const struct stat* st) {
     // Open src in read mode
     FILE* in = fopen(src, "rb");
     if (!in) return false;
@@ -602,9 +523,303 @@ static bool copy_file(const char* src, const char* dest) {
             break;
         }
     }
-    fclose(in);
-    fclose(out);
+
+    if (ferror(in)) ok = false;
+    if (ok && fchmod(fileno(out), st->st_mode & 07777) != 0) ok = false;
+    if (fclose(in) != 0) ok = false;
+    if (fclose(out) != 0) ok = false;
+    if (!ok) return false;
+
+    struct timespec times[] = {
+        st->st_atim,
+        st->st_mtim
+    };
+    return utimensat(AT_FDCWD, dest, times, 0) == 0;
+}
+
+static bool dest_inside_src(const char* src, const char* dest) {
+    bool nested = startswith(dest, src);
+    struct stat src_st, dest_st;
+
+    if (lstat(src, &src_st) != 0 || lstat(dest, &dest_st) != 0) return false;
+
+    if (!S_ISDIR(src_st.st_mode) || S_ISLNK(src_st.st_mode) || S_ISLNK(dest_st.st_mode))
+        return false;
+
+    const size_t src_len = strlen(src);
+
+    return strncmp(src, dest, src_len) != 0
+        ? false
+        : !(dest[src_len] != '\0' && dest[src_len] != '/');
+}
+
+/* ensure_dest_dir:
+ *     - dest: The destination directory path.
+ *     - mode: The mkdir mode (typically src mode & 0777).
+ *
+ * Creates dest, tolerating EEXIST if dest is already a directory.
+ * Returns true on success. */
+static bool ensure_dest_dir(const char* dest, mode_t mode) {
+    if (mkdir(dest, mode) != 0) {
+        // Ignore error if dest folder exists
+        if (errno != EEXIST) return false;
+        struct stat dest_st;
+        if (lstat(dest, &dest_st) != 0 || !S_ISDIR(dest_st.st_mode)) return false;
+    }
+    return true;
+}
+
+/* preserve_metadata:
+ *     - dest: The destination file/directory.
+ *     - st: stat of src (from lstat, used for mode + timestamps).
+ *
+ * Applies src mode and atime/mtime to dest. Returns true on success. */
+static bool preserve_metadata(const char* dest, const struct stat* st) {
+    if (chmod(dest, st->st_mode & 07777) != 0) return false;
+
+    struct timespec times[] = { st->st_atim, st->st_mtim };
+    return utimensat(AT_FDCWD, dest, times, 0) == 0;
+}
+
+/* copy_dir_children:
+ *     - src: The source directory.
+ *     - dest: The destination directory (already created).
+ *     - fn: Per-child function, e.g. copy() or move().
+ *
+ * Iterates src entries (skipping "." and "..") and applies fn() to each
+ * src/dest child pair. Owns opendir/closedir. Returns true if all
+ * children succeeded. */
+static bool copy_dir_children(const char* src, const char* dest, bool (*fn)(const char*, const char*)) {
+    DIR* dir = opendir(src);
+    if (!dir) return false;
+
+    struct dirent* entry;
+    const size_t src_len = strlen(src);
+    const size_t dest_len = strlen(dest);
+    while ((entry = readdir(dir)) != NULL) {
+        if (folder_pointer(entry->d_name)) continue;
+
+        const size_t name_len = strlen(entry->d_name);
+
+        char* child_src = malloc(src_len + 1 + name_len + 1);
+        char* child_dest = malloc(dest_len + 1 + name_len + 1);
+
+        if (!child_src || !child_dest) {
+            free(child_src);
+            free(child_dest);
+            closedir(dir);
+            return false;
+        }
+
+        snprintf(
+            child_src,
+            src_len + 1 + name_len + 1,
+            "%s/%s",
+            src,
+            entry->d_name
+        );
+
+        snprintf(
+            child_dest,
+            dest_len + 1 + name_len + 1,
+            "%s/%s",
+            dest,
+            entry->d_name
+        );
+
+        bool ok = fn(child_src, child_dest);
+        free(child_src);
+        free(child_dest);
+
+        if (!ok) {
+            closedir(dir);
+            return false;
+        }
+    }
+    return closedir(dir) == 0;
+}
+
+static bool copy_symlink(const char* src, const char* dest) {
+    const size_t bufsize = 8192;
+    char* symlink_buf = malloc(bufsize);
+    if (symlink_buf == NULL) return false;
+
+    ssize_t target_size = readlink(src, symlink_buf, bufsize - 1);
+    if (target_size < 0) {
+        free(symlink_buf);
+        return false;
+    }
+
+    symlink_buf[target_size] = '\0';
+    bool ok = symlink(symlink_buf, dest) != 0;
+    free(symlink_buf);
     return ok;
+}
+
+/* copy:
+ *     - src: The source file to copy.
+ *     - dest: The destination to copy to.
+ *
+ * Copies a file from src to dest. Assumes that src and dest are absolute paths. */
+static bool copy(const char* src, const char* dest) {
+    struct stat st;
+    return lstat(src, &st) == 0 && !dest_inside_src(src, dest) && (
+        (S_ISREG(st.st_mode) && copy_file_data(src, dest, &st)) ||
+        (S_ISDIR(st.st_mode) && 
+            ensure_dest_dir(dest, st.st_mode & 0777) && 
+            copy_dir_children(src, dest, copy) &&
+            preserve_metadata(dest, &st)
+        ) ||
+        (S_ISLNK(st.st_mode) && copy_symlink(src, dest))
+    );
+}
+
+/* move:
+ *     - src: The location to move files from.
+ *     - dest: The location to move files to.
+ *
+ *  Cuts and pastes files from src to dest recursively. */
+static bool move(const char* src, const char* dest) {
+    struct stat st;
+    return lstat(src, &st) == 0 && (
+        // rename is faster, but only works on same filesystem
+        rename(src, dest) == 0 || (
+            // Errors other than EXDEV fail the function
+            errno != EXDEV && (
+                (S_ISREG(st.st_mode) &&
+                    copy_file_data(src, dest, &st) &&
+                    unlink(src) == 0
+                ) ||
+                (S_ISDIR(st.st_mode) &&
+                    ensure_dest_dir(dest, st.st_mode & 0777) &&
+                    copy_dir_children(src, dest, move) &&
+                    preserve_metadata(dest, &st) &&
+                    rmdir(src) == 0
+                ) ||
+                (S_ISLNK(st.st_mode))
+            )
+        )
+    );
+}
+
+static bool delete(const char* src) {
+    struct stat st;
+    if (lstat(src, &st) != 0) return false;
+
+    if (!S_ISDIR(st.st_mode))
+        return unlink(src) == 0;
+
+    DIR* dir = opendir(src);
+    if (dir == NULL) return false;
+
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (folder_pointer(entry->d_name)) continue;
+
+        const size_t src_len = strlen(src);
+        const size_t name_len = strlen(entry->d_name);
+
+        char* path = malloc(src_len + 1 + name_len + 1);
+        if (path == NULL) {
+            closedir(dir);
+            return false;
+        }
+
+        memcpy(path, src, src_len);
+        path[src_len] = '/';
+        memcpy(path + src_len + 1, entry->d_name, name_len + 1);
+
+        if (!delete(path)) {
+            free(path);
+            closedir(dir);
+            return false;
+        }
+        free(path);
+    }
+    if (closedir(dir) != 0) return false;
+    return rmdir(src) == 0;
+}
+
+// ================================================================================================
+// Time Functions
+// ================================================================================================
+
+/* parse_date:
+ *     - str: The date to parse.
+ *
+ * Converts a date string to a time_t reference point.
+ * Supports relative durations like "40s", "6m", "8h", "1D", "4W", "3M", "2Y"
+ * (measured backward from now), or an absolute date like "MM.DD.YY".
+ * The returned time represents the cutoff: files modified after it are newer,
+ * files modified before it are older. */
+static time_t parse_date(const char* str) {
+    // Absolute date "MM.DD.YY"
+    if (strchr(str, '.') != NULL) {
+        int mm = 0, dd = 0, yy = 0;
+
+        if (
+            // MM.DD.YY could not be parsed properly
+            sscanf(str, "%d.%d.%d", &mm, &dd, &yy) != 3 ||
+            // Times are not within valid ranges
+            (mm < 1 || mm > 12 || dd < 1 || dd > 31 || yy < 0 || yy > 99)
+        ) return TIME_ERROR;
+
+        struct tm tm;
+        memset(&tm, 0, sizeof(tm));
+        tm.tm_year = (yy >= 70 ? yy : 100 + yy); // 70-99 -> 1970-1999, 00-69 -> 2000-2069
+        tm.tm_mon = mm - 1;
+        tm.tm_mday = dd;
+        tm.tm_isdst = -1;
+        return mktime(&tm);
+    }
+
+    // Relative duration like "40s", "6m", "8h", "1D", "4W", "3M", "2Y"
+    char* end;
+    double value = strtod(str, &end);
+    if (end == str) return TIME_ERROR;
+
+    while (isspace((unsigned char)*end))
+        end++;
+
+    char unit = *end;
+    if (unit == '\0') return TIME_ERROR;
+
+    // Accept both the documented cases and their lowercase/uppercase variants
+    // (e.g. "S", "H", "d", "y"), but flag exact-case mismatches so the caller
+    // can alert the user. The canonical forms are: s m h D W M Y.
+    char canonical;
+    switch (unit) {
+        case 's': case 'S': canonical = 's'; break;
+        case 'm': canonical = 'm'; break;
+        case 'h': case 'H': canonical = 'h'; break;
+        case 'd': case 'D': canonical = 'D'; break;
+        case 'w': case 'W': canonical = 'W'; break;
+        case 'M': canonical = 'M'; break;
+        case 'y': case 'Y': canonical = 'Y'; break;
+        default: return TIME_ERROR;
+    }
+
+    // wrong-case unit
+    if (unit != canonical) return TIME_CANON_ERROR;
+
+    time_t now = time(NULL);
+    time_t multiplier;
+    switch (unit) {
+        case 's': multiplier = 1;                  break; // seconds
+        case 'm': multiplier = 60;                 break; // minutes
+        case 'h': multiplier = 60 * 60;            break; // hours
+        case 'D': multiplier = 24 * 60 * 60;       break; // days
+        case 'W': multiplier = 7 * 24 * 60 * 60;   break; // weeks
+        case 'M': multiplier = 30 * 24 * 60 * 60;  break; // months (approx 30 days)
+        case 'Y': multiplier = 365 * 24 * 60 * 60; break; // years (approx 365 days)
+        default: return TIME_ERROR;
+    }
+
+    do end++; 
+    while (isspace((unsigned char)*end));
+
+    if (*end != '\0') return TIME_ERROR;
+    return now - (time_t)(value * multiplier);
 }
 
 // ================================================================================================
@@ -860,7 +1075,7 @@ static int exec_action(FindCommand* command, StringArray* results) {
 
         // Procedurally delete all files in list.
         for (size_t j = 0; j < results->count; j++) {
-            if (remove(results->items[j]) != 0)
+            if (!delete(results->items[j]))
                 fprintf(stderr, "Failed to delete: %s\n", results->items[j]);
         }
         return EXIT_SUCCESS;
@@ -877,8 +1092,8 @@ static int exec_action(FindCommand* command, StringArray* results) {
 
             // Copy or move to destinatio depending on action.
             bool ok = command->action == ACTION_MOVE
-                ? rename(results->items[j], dest) == 0
-                : copy_file(results->items[j], dest);
+                ? move(results->items[j], dest)
+                : copy(results->items[j], dest);
 
             if (!ok)
                 fprintf(stderr, "Failed to %s: %s\n",
