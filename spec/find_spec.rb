@@ -236,13 +236,11 @@ describe 'find' do
             .to match_array([ "#{TMP_DIR}/src/main.c", "#{TMP_DIR}/main.c" ])
     end
 
-    # main.c:747 compares with a 2% slack ("similarity >= threshold - 0.02"), so a
-    # 100% threshold still matches a file that differs by a single byte.
-    it 'matches a one byte difference at a 100% similarity threshold' do
+    # Similarity is exact: a 100% threshold only matches byte-identical files.
+    it 'excludes a one byte difference at a 100% similarity threshold' do
         expect(run_script("files in #{TMP_DIR}/similar where contents similar 100 to #{TMP_DIR}/similar/original.txt"))
             .to match_array([
-                "#{TMP_DIR}/similar/original.txt",
-                "#{TMP_DIR}/similar/near_copy.txt"
+                "#{TMP_DIR}/similar/original.txt"
             ])
     end
 
@@ -340,6 +338,15 @@ describe 'find' do
             ])
     end
 
+    it 'does not duplicate results when a child directory is searched before its parent' do
+        expect(run_script("files in #{TMP_DIR}/docs/nested and #{TMP_DIR}/docs"))
+            .to match_array([
+                "#{TMP_DIR}/docs/guide.md",
+                "#{TMP_DIR}/docs/.draft.md",
+                "#{TMP_DIR}/docs/nested/notes.md",
+            ])
+    end
+
     it 'prints nothing and succeeds for a path that does not exist' do
         expect(run_script("files in #{TMP_DIR}/does-not-exist")).to be_empty
         expect(run_status("files in #{TMP_DIR}/does-not-exist")).to eq(0)
@@ -356,9 +363,9 @@ describe 'find' do
         expect(result).not_to include("#{TMP_DIR}/data/big.log")
     end
 
-    it 'accepts the operator form of the size condition' do
-        expect(run_script(%(files in #{TMP_DIR} where size ">" 100kb)))
-            .to match_array([ "#{TMP_DIR}/data/big.log" ])
+    it 'rejects the operator form of the size condition' do
+        expect(run_script(%(files in #{TMP_DIR} where size ">" 100kb), merge_stderr: true))
+            .to include('find: unknown condition. Expected: name, size, date, perms, or contents.')
     end
 
     it 'accepts the separated "greater than" form of the size condition' do
@@ -368,6 +375,24 @@ describe 'find' do
 
     it 'returns nothing when no file is large enough' do
         expect(run_script("files in #{TMP_DIR} where size greaterthan 5mb")).to be_empty
+    end
+
+    it 'rejects an invalid size value' do
+        expect(run_script("files in #{TMP_DIR} where size greaterthan garbageXYZ", merge_stderr: true))
+            .to include('find: incomplete or missing condition after "where".')
+        expect(run_status("files in #{TMP_DIR} where size greaterthan garbageXYZ")).to eq(1)
+    end
+
+    it 'rejects an invalid date value' do
+        expect(run_script("files in #{TMP_DIR} where date newerthan garbageXYZ", merge_stderr: true))
+            .to include('find: incomplete or missing condition after "where".')
+        expect(run_status("files in #{TMP_DIR} where date newerthan garbageXYZ")).to eq(1)
+    end
+
+    it 'matches empty files with lessthan' do
+        FileUtils.touch("#{TMP_DIR}/data/empty.txt")
+        expect(run_script("files in #{TMP_DIR}/data where size lessthan 1kb"))
+            .to include("#{TMP_DIR}/data/empty.txt", "#{TMP_DIR}/data/small.txt")
     end
 
     it 'finds files modified before a relative date' do
@@ -393,12 +418,9 @@ describe 'find' do
             ])
     end
 
-    it 'accepts the operator form of the date condition' do
-        expect(run_script(%(files in #{TMP_DIR} where date "<" 1D)))
-            .to match_array([
-                "#{TMP_DIR}/data/big.log",
-                "#{TMP_DIR}/src/util.c"
-            ])
+    it 'rejects the operator form of the date condition' do
+        expect(run_script(%(files in #{TMP_DIR} where date "<" 1D), merge_stderr: true))
+            .to include('find: unknown condition. Expected: name, size, date, perms, or contents.')
     end
 
     it 'negates a date condition' do

@@ -4,6 +4,7 @@
 
 #include <errno.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -106,16 +107,6 @@ typedef struct {
     bool include_visible;
 } FindCommand;
 
-#define TIME_ERROR ((time_t)-1)
-#define TIME_CANON_ERROR ((time_t)-2)
-
-// ================================================================================================
-// Function Headers
-// ================================================================================================
-
-static bool path_covered(StringArray* paths, const char* path);
-static void search_recursive(const char* path, FindCommand* command, StringArray* results);
-
 // ================================================================================================
 // String Helpers
 // ================================================================================================
@@ -148,24 +139,32 @@ const char* basename(const char* path) {
 }
 
 /* join_path:
- *     - dest: The buffer to write the joined path into.
- *     - size: The size of the dest buffer.
  *     - dir: The parent directory.
  *     - name: The entry name to append to the directory.
  *
  * Joins a directory and an entry name with exactly one "/", so a directory that
- * was given with a trailing slash does not produce a doubled separator. */
-void join_path(char* dest, size_t size, const char* dir, const char* name) {
+ * was given with a trailing slash does not produce a doubled separator.
+ * Returns a malloc'd string of exactly the necessary size that the caller must
+ * free, or NULL on allocation failure (or size overflow). */
+char* join_path(const char* dir, const char* name) {
     size_t len = strlen(dir);
 
     // Keep the root "/" intact, but drop any other trailing separators.
     while (len > 1 && dir[len - 1] == '/') len--;
 
     // The root already ends in a separator, so do not add a second one.
-    const char* separator = (len == 1 && dir[0] == '/') ? "" : "/";
-    snprintf(dest, size, "%.*s%s%s", (int)len, dir, separator, name);
-}
+    size_t seplen = (len == 1 && dir[0] == '/') ? 0 : 1;
+    size_t namelen = strlen(name);
 
+    if (len > SIZE_MAX - seplen - namelen - 1) return NULL;
+    char* dest = malloc(len + seplen + namelen + 1);
+    if (!dest) return NULL;
+
+    memcpy(dest, dir, len);
+    if (seplen) dest[len] = '/';
+    memcpy(dest + len + seplen, name, namelen + 1);
+    return dest;
+}
 
 // ================================================================================================
 // Array Helpers
@@ -256,7 +255,7 @@ void FreeConditions(ConditionArray* array) {
 static long long byte_count(const char* path) {
     struct stat st;
     // Check if file exists
-    if (stat(path, &st) != 0) return -1;
+    if (lstat(path, &st) != 0) return -1;
 
     // If file, return file size
     if (S_ISREG(st.st_mode)) return (long long)st.st_size;
@@ -273,11 +272,15 @@ static long long byte_count(const char* path) {
         while ((entry = readdir(dir)) != NULL) {
             if (folder_pointer(entry->d_name)) continue;
 
-            char child_path[PATH_MAX];
-            join_path(child_path, sizeof(child_path), path, entry->d_name);
+            char* child_path = join_path(path, entry->d_name);
+            if (!child_path) {
+                closedir(dir);
+                return -1;
+            }
 
             // Recursively search each item
             long long size = byte_count(child_path);
+            free(child_path);
 
             if (size < 0) {
                 closedir(dir);
@@ -324,7 +327,7 @@ static long long parse_bytes(const char* str) {
 
     if (*end != '\0') return -1;
 
-    if (str_equals(unit, "b"))
+    if (str_equals(unit, "b") || unit[0] == '\0')
         multiplier = 1;
     else if (str_equals(unit, "kb"))
         multiplier = 1024LL;
@@ -334,8 +337,6 @@ static long long parse_bytes(const char* str) {
         multiplier = 1024LL * 1024 * 1024;
     else if (str_equals(unit, "tb"))
         multiplier = 1024LL * 1024 * 1024 * 1024;
-    else if (unit[0] == '\0')
-        multiplier = 1;
     // Unknown unit
     else return -1;
 
@@ -344,7 +345,8 @@ static long long parse_bytes(const char* str) {
 
 // is_executable: returns true if a path is executable (+x bit)
 static bool is_executable(const char* path) {
-    return access(path, X_OK) == 0;
+    struct stat st;
+    return stat(path, &st) == 0 && (st.st_mode & 0111) != 0;
 }
 
 /* has_permission:
@@ -363,21 +365,43 @@ static bool has_permission(const char* path, char* permissions) {
         // end was initialized properly
         *end != '\0' || 
         // mode is a valid octal
-        mode < 0 || mode > 0777 || 
+        mode < 0 || mode > 07777 || 
         // file exists
         stat(path, &st) != 0
     ) && 
     // permission bits are equal
-    (st.st_mode & 0777) == (mode & 0777);
+    (st.st_mode & 07777) == (mode & 07777);
+}
+
+/* memsearch:
+ *     - haystack: The buffer to search in (may contain NUL bytes).
+ *     - haystack_len: Number of valid bytes in haystack.
+ *     - needle: The byte string to search for (may contain NUL bytes).
+ *     - needle_len: Number of bytes in needle.
+ *
+ * Byte-wise substring search (strstr stops at the first NUL, so it misses
+ * matches past embedded NULs in binary files). An empty needle matches. */
+static bool memsearch(const char* haystack, size_t haystack_len, const char* needle, size_t needle_len) {
+    if (needle_len == 0) return true;
+    if (haystack_len < needle_len) return false;
+    for (size_t i = 0; i <= haystack_len - needle_len; i++) {
+        if (memcmp(haystack + i, needle, needle_len) == 0)
+            return true;
+    }
+    return false;
 }
 
 /* file_contains:
  *     - path: The path to the file to evaluate.
  *     - needle: The string to check inside the file.
  *
- * Returns true if the file at the given path exists 
+ * Returns true if the file at the given path exists
  * and contains the exact substring of the needle. */
 static bool file_contains(const char* path, const char* needle) {
+    // Only regular files have searchable contents (skip dirs, symlinks, etc.).
+    struct stat st;
+    if (lstat(path, &st) != 0 || !S_ISREG(st.st_mode)) return false;
+
     FILE* f = fopen(path, "rb");
     if (!f) return false;
 
@@ -398,9 +422,9 @@ static bool file_contains(const char* path, const char* needle) {
         return false;
     }
 
-    // Search for the needle in the read buffer.
-    content[fread(content, 1, file_size, f)] = '\0';
-    bool found = strstr(content, needle) != NULL;
+    // Search the bytes actually read (buffer may contain NULs).
+    size_t nread = fread(content, 1, file_size, f);
+    bool found = memsearch(content, nread, needle, strlen(needle));
 
     free(content);
     fclose(f);
@@ -528,7 +552,11 @@ static bool copy_file_data(const char* src, const char* dest, const struct stat*
     if (ok && fchmod(fileno(out), st->st_mode & 07777) != 0) ok = false;
     if (fclose(in) != 0) ok = false;
     if (fclose(out) != 0) ok = false;
-    if (!ok) return false;
+    // Never leave a truncated partial behind masquerading as a good copy.
+    if (!ok) {
+        unlink(dest);
+        return false;
+    }
 
     struct timespec times[] = {
         st->st_atim,
@@ -537,20 +565,61 @@ static bool copy_file_data(const char* src, const char* dest, const struct stat*
     return utimensat(AT_FDCWD, dest, times, 0) == 0;
 }
 
-static bool dest_inside_src(const char* src, const char* dest) {
-    bool nested = startswith(dest, src);
+
+// returns true if src and dest are the same file.
+static bool is_same_file(const char* src, const char* dest) {
     struct stat src_st, dest_st;
+    if (stat(src, &src_st) != 0 || stat(dest, &dest_st) != 0) return false;
+    return src_st.st_dev == dest_st.st_dev && src_st.st_ino == dest_st.st_ino;
+}
 
-    if (lstat(src, &src_st) != 0 || lstat(dest, &dest_st) != 0) return false;
+// returns true if dest is inside src.
+static bool dest_inside_src(const char* src, const char* dest) {
+    struct stat src_st;
+    if (lstat(src, &src_st) != 0) return false;
+    if (!S_ISDIR(src_st.st_mode) || S_ISLNK(src_st.st_mode)) return false;
 
-    if (!S_ISDIR(src_st.st_mode) || S_ISLNK(src_st.st_mode) || S_ISLNK(dest_st.st_mode))
-        return false;
+    // Resolve src so prefix checks are canonical (no trailing slash, no symlinks).
+    char rsrc[PATH_MAX];
+    const char* s = realpath(src, rsrc) ? (const char*)rsrc : src;
 
-    const size_t src_len = strlen(src);
+    char rdst[PATH_MAX];
+    char rpar[PATH_MAX];
+    char dlex[PATH_MAX];
+    const char* d = dest;
+    struct stat dst_st;
+    if (lstat(dest, &dst_st) == 0) {
+        if (S_ISLNK(dst_st.st_mode)) return false;
+        const char* r = realpath(dest, rdst);
+        if (r) d = r;
+    } else {
+        const char* slash = strrchr(dest, '/');
+        if (slash && slash != dest) {
+            const size_t plen = (size_t)(slash - dest);
+            if (plen >= sizeof(rpar)) return true;
+            memcpy(rpar, dest, plen);
+            rpar[plen] = '\0';
+            const char* rp = realpath(rpar, rdst) ? (const char*)rdst : NULL;
+            if (rp) {
+                const size_t rlen = strlen(rp);
+                const size_t rest = strlen(slash);
+                if (rlen + rest >= sizeof(dlex)) return true;
+                memcpy(dlex, rp, rlen);
+                memcpy(dlex + rlen, slash, rest + 1);
+                d = dlex;
+            }
+        }
+    }
 
-    return strncmp(src, dest, src_len) != 0
-        ? false
-        : !(dest[src_len] != '\0' && dest[src_len] != '/');
+    // Strip trailing slashes for comparison (keep root "/" intact).
+    size_t slen = strlen(s);
+    while (slen > 1 && s[slen - 1] == '/') slen--;
+    size_t dlen = strlen(d);
+    while (dlen > 1 && d[dlen - 1] == '/') dlen--;
+
+    if (dlen < slen) return false;
+    if (strncmp(s, d, slen) != 0) return false;
+    return dlen == slen || d[slen] == '/';
 }
 
 /* ensure_dest_dir:
@@ -639,6 +708,12 @@ static bool copy_dir_children(const char* src, const char* dest, bool (*fn)(cons
     return closedir(dir) == 0;
 }
 
+/* copy_symlink:
+ *     - src: The location of the original symlink.
+ *     - dest: The destination to copy the symlink to.
+ *
+ * Creates a new symlink in dest, that points to the 
+ * same location as src.*/
 static bool copy_symlink(const char* src, const char* dest) {
     const size_t bufsize = 8192;
     char* symlink_buf = malloc(bufsize);
@@ -651,7 +726,7 @@ static bool copy_symlink(const char* src, const char* dest) {
     }
 
     symlink_buf[target_size] = '\0';
-    bool ok = symlink(symlink_buf, dest) != 0;
+    bool ok = symlink(symlink_buf, dest) == 0;
     free(symlink_buf);
     return ok;
 }
@@ -663,7 +738,7 @@ static bool copy_symlink(const char* src, const char* dest) {
  * Copies a file from src to dest. Assumes that src and dest are absolute paths. */
 static bool copy(const char* src, const char* dest) {
     struct stat st;
-    return lstat(src, &st) == 0 && !dest_inside_src(src, dest) && (
+    return lstat(src, &st) == 0 && !dest_inside_src(src, dest) && !is_same_file(src, dest) && (
         (S_ISREG(st.st_mode) && copy_file_data(src, dest, &st)) ||
         (S_ISDIR(st.st_mode) && 
             ensure_dest_dir(dest, st.st_mode & 0777) && 
@@ -681,22 +756,21 @@ static bool copy(const char* src, const char* dest) {
  *  Cuts and pastes files from src to dest recursively. */
 static bool move(const char* src, const char* dest) {
     struct stat st;
-    return lstat(src, &st) == 0 && (
+    return lstat(src, &st) == 0 && !dest_inside_src(src, dest) && !is_same_file(src, dest) && (
         // rename is faster, but only works on same filesystem
         rename(src, dest) == 0 || (
             // Errors other than EXDEV fail the function
             errno != EXDEV && (
-                (S_ISREG(st.st_mode) &&
-                    copy_file_data(src, dest, &st) &&
-                    unlink(src) == 0
-                ) ||
+                (S_ISREG(st.st_mode) && copy_file_data(src, dest, &st) && unlink(src) == 0) ||
                 (S_ISDIR(st.st_mode) &&
                     ensure_dest_dir(dest, st.st_mode & 0777) &&
                     copy_dir_children(src, dest, move) &&
-                    preserve_metadata(dest, &st) &&
+                    // Best-effort: a timestamp/perm hiccup must not orphan an
+                    // emptied source dir next to a complete dest tree.
+                    (preserve_metadata(dest, &st) || true) &&
                     rmdir(src) == 0
                 ) ||
-                (S_ISLNK(st.st_mode))
+                (S_ISLNK(st.st_mode) && copy_symlink(src, dest) && (unlink(src) == 0))
             )
         )
     );
@@ -762,7 +836,7 @@ static time_t parse_date(const char* str) {
             sscanf(str, "%d.%d.%d", &mm, &dd, &yy) != 3 ||
             // Times are not within valid ranges
             (mm < 1 || mm > 12 || dd < 1 || dd > 31 || yy < 0 || yy > 99)
-        ) return TIME_ERROR;
+        ) return (time_t)-1;
 
         struct tm tm;
         memset(&tm, 0, sizeof(tm));
@@ -776,13 +850,13 @@ static time_t parse_date(const char* str) {
     // Relative duration like "40s", "6m", "8h", "1D", "4W", "3M", "2Y"
     char* end;
     double value = strtod(str, &end);
-    if (end == str) return TIME_ERROR;
+    if (end == str) return (time_t)-1;
 
     while (isspace((unsigned char)*end))
         end++;
 
     char unit = *end;
-    if (unit == '\0') return TIME_ERROR;
+    if (unit == '\0') return (time_t)-1;
 
     // Accept both the documented cases and their lowercase/uppercase variants
     // (e.g. "S", "H", "d", "y"), but flag exact-case mismatches so the caller
@@ -796,11 +870,11 @@ static time_t parse_date(const char* str) {
         case 'w': case 'W': canonical = 'W'; break;
         case 'M': canonical = 'M'; break;
         case 'y': case 'Y': canonical = 'Y'; break;
-        default: return TIME_ERROR;
+        default: return (time_t)-1;
     }
 
     // wrong-case unit
-    if (unit != canonical) return TIME_CANON_ERROR;
+    if (unit != canonical) return (time_t)-2;
 
     time_t now = time(NULL);
     time_t multiplier;
@@ -812,42 +886,110 @@ static time_t parse_date(const char* str) {
         case 'W': multiplier = 7 * 24 * 60 * 60;   break; // weeks
         case 'M': multiplier = 30 * 24 * 60 * 60;  break; // months (approx 30 days)
         case 'Y': multiplier = 365 * 24 * 60 * 60; break; // years (approx 365 days)
-        default: return TIME_ERROR;
+        default: return (time_t)-1;
     }
 
     do end++; 
     while (isspace((unsigned char)*end));
 
-    if (*end != '\0') return TIME_ERROR;
+    if (*end != '\0') return (time_t)-1;
     return now - (time_t)(value * multiplier);
+}
+
+/* expand_file_markers:
+ *     - templ: A command template token, possibly containing "{file}".
+ *     - filepath: The matched path substituted for every marker.
+ *
+ * Expands ALL "{file}" occurrences (not just the first) in a single pass.
+ * Returns a malloc'd string the caller must free, or NULL on failure. */
+static char* expand_file_markers(const char* templ, const char* filepath) {
+    static const char marker[] = "{file}";
+    static const size_t mlen = sizeof(marker) - 1;
+
+    size_t count = 0;
+    for (const char* p = templ; (p = strstr(p, marker)) != NULL; p += mlen)
+        count++;
+
+    if (count == 0) return strdup(templ);
+
+    size_t tlen = strlen(templ);
+    size_t flen = strlen(filepath);
+    // Expanded size: tlen - count*mlen + count*flen + 1. Guard overflow.
+    size_t total;
+    if (flen >= mlen) {
+        size_t extra = flen - mlen;
+        if (count > 0 && extra > (SIZE_MAX - tlen - 1) / count) return NULL;
+        total = tlen + count * extra + 1;
+    } else {
+        total = tlen - count * (mlen - flen) + 1;
+    }
+
+    char* out = malloc(total);
+    if (!out) return NULL;
+
+    const char* src = templ;
+    char* dst = out;
+    const char* hit;
+    while ((hit = strstr(src, marker)) != NULL) {
+        size_t chunk = (size_t)(hit - src);
+        memcpy(dst, src, chunk);
+        dst += chunk;
+        memcpy(dst, filepath, flen);
+        dst += flen;
+        src = hit + mlen;
+    }
+    strcpy(dst, src);
+    return out;
 }
 
 // ================================================================================================
 // Search Logic
 // ================================================================================================
 
-// Root search command. Creates the StringArray object and calls the recursive searching.
-StringArray search(FindCommand* command) {
-    StringArray results = {
-        .items = NULL,
-        .count = 0,
-        .capacity = 0
-    };
+/* dedupe_results:
+ *     - results: The list of results to filter.
+ *
+ * Removes duplicate result entries by canonical identity (realpath when the
+ * path still resolves, raw string otherwise), preserving first-seen order.
+ * This catches overlaps path_covered cannot skip: a parent searched after its
+ * child, or the same tree spelled differently ("./src", trailing slashes). */
+static void dedupe_results(StringArray* results) {
+    if (results->count < 2) return;
 
-    StringArray searched = {
-        .items = NULL,
-        .count = 0,
-        .capacity = 0
-    };
-
-    for (int i = 0; i < command->paths.count; i++) {
-        if (!path_covered(&searched, command->paths.items[i])) {
-            AddString(&searched, command->paths.items[i]);
-            search_recursive(command->paths.items[i], command, &results);
+    char** canon = malloc(results->count * sizeof(char*));
+    if (!canon) return; // OOM: keep duplicates rather than fail the search
+    for (size_t i = 0; i < results->count; i++) {
+        char tmp[PATH_MAX];
+        const char* src = realpath(results->items[i], tmp) ? tmp : results->items[i];
+        canon[i] = strdup(src);
+        if (!canon[i]) {
+            for (size_t m = 0; m < i; m++) free(canon[m]);
+            free(canon);
+            return;
         }
     }
-    FreeList(&searched);
-    return results;
+
+    size_t kept = 0;
+    for (size_t i = 0; i < results->count; i++) {
+        bool dup = false;
+        for (size_t k = 0; k < kept; k++) {
+            if (str_equals(canon[k], canon[i])) {
+                dup = true;
+                break; 
+            }
+        }
+        if (dup) {
+            free(results->items[i]);
+            free(canon[i]);
+        } else {
+            results->items[kept] = results->items[i];
+            canon[kept] = canon[i];
+            kept++;
+        }
+    }
+    for (size_t k = 0; k < kept; k++) free(canon[k]);
+    free(canon);
+    results->count = kept;
 }
 
 /* path_covered:
@@ -879,6 +1021,38 @@ static bool path_covered(StringArray* paths, const char* path) {
     return false;
 }
 
+/* cmp_path_len_lex:
+ *     - a: Pointer to the first path entry (as const char* const* for qsort).
+ *     - b: Pointer to the second path entry (as const char* const* for qsort).
+ *
+ * Orders result paths parents-first (shortest first, lexicographic tiebreak)
+ * so exec_action handles a directory before its descendants. Deterministic. */
+static int cmp_path_len_lex(const void* a, const void* b) {
+    const char* const* pa = (const char* const*)a;
+    const char* const* pb = (const char* const*)b;
+    const size_t la = strlen(*pa);
+    const size_t lb = strlen(*pb);
+    if (la != lb) return la < lb ? -1 : 1;
+    return strcmp(*pa, *pb);
+}
+
+/* path_within_lex:
+ *     - parent: The candidate ancestor path (trailing slashes ignored).
+ *     - child: The path to test (trailing slashes ignored).
+ *
+ * Lexical version of the path_covered prefix check for paths that may no
+ * longer exist (already moved/deleted), where realpath() would fail.
+ * Returns true if child equals parent or lives under parent + "/". */
+static bool path_within_lex(const char* parent, const char* child) {
+    size_t plen = strlen(parent);
+    while (plen > 1 && parent[plen - 1] == '/') plen--;
+    size_t clen = strlen(child);
+    while (clen > 1 && child[clen - 1] == '/') clen--;
+    if (clen < plen) return false;
+    if (strncmp(parent, child, plen) != 0) return false;
+    return clen == plen || child[plen] == '/';
+}
+
 /* count_directory:
  *     - path: The directory to check for files.
  *     - what: Whether to check files, folders, or both.
@@ -901,11 +1075,11 @@ static long count_directory(const char* path, CountWhat what, bool shallow, bool
         bool is_hidden = entry->d_name[0] == '.';
         if ((include_hidden && !is_hidden) || (include_visible && is_hidden)) continue;
 
-        char fullpath[4096];
-        join_path(fullpath, sizeof(fullpath), path, entry->d_name);
+        char* fullpath = join_path(path, entry->d_name);
+        if (!fullpath) continue;
 
         struct stat st;
-        if (lstat(fullpath, &st) != 0) continue;
+        if (lstat(fullpath, &st) != 0) { free(fullpath); continue; }
 
         // Evaluate the match based on the CountWhat value.
         bool match = false;
@@ -916,12 +1090,12 @@ static long count_directory(const char* path, CountWhat what, bool shallow, bool
         }
 
         // If our match is successful, increment our count.
-        if (match)
-            count++;
+        if (match) count++;
 
         // If shallow search is disabled and the item is a directory, recursive search.
         if (!shallow && S_ISDIR(st.st_mode))
             count += count_directory(fullpath, what, shallow, include_hidden, include_visible);
+        free(fullpath);
     }
     closedir(dir);
     return count;
@@ -956,15 +1130,19 @@ static bool eval_condition(const char* fullpath, const char* name, const Conditi
         case CONDITION_OLDERTHAN: case CONDITION_NEWERTHAN: {
             struct stat st;
             time_t cutoff = parse_date(cond->value);
-            if (cutoff == TIME_ERROR || stat(fullpath, &st) != 0) {
+            if (cutoff == (time_t)-1 || stat(fullpath, &st) != 0) {
                 met = false;
                 break;
             }
             // olderthan: mtime before the cutoff; newerthan: mtime after the cutoff
             met = (cond->type == CONDITION_OLDERTHAN) ? st.st_mtime < cutoff : st.st_mtime > cutoff; break;
         }
-        case CONDITION_GREATERTHAN:   met = byte_count(fullpath) > parse_bytes(cond->value); break;
-        case CONDITION_LESSTHAN:      met = byte_count(fullpath) < parse_bytes(cond->value); break;
+        case CONDITION_GREATERTHAN: case CONDITION_LESSTHAN: {
+            long long nbytes = byte_count(fullpath);
+            long long parsed = parse_bytes(cond->value);
+            met = nbytes >= 0 && parsed >= 0 &&
+                (cond->type == CONDITION_GREATERTHAN ? nbytes > parsed : nbytes < parsed); break;
+        }
         case CONDITION_EXECUTABLE:    met = is_executable(fullpath);               break;
         case CONDITION_PERM_BITS:     met = has_permission(fullpath, cond->value); break;
         case CONDITION_FILE_CONTAINS: met = file_contains(fullpath, cond->value);  break;
@@ -977,17 +1155,14 @@ static bool eval_condition(const char* fullpath, const char* name, const Conditi
             break;
         }
         case CONDITION_CONTENTS_SIMILAR: {
-            double similarity = file_similarity(fullpath, cond->reference_file);
-            met = similarity >= 0.0 && similarity >= (cond->similarity_threshold - 0.02);
+            const double similarity = file_similarity(fullpath, cond->reference_file);
+            met = similarity >= 0.0 && similarity >= (cond->similarity_threshold);
             break;
         }
     }
 
-    // "not" applies to a single condition, flipping its result.
-    if (cond->negated)
-        met = !met;
-
-    return met;
+    // Return the opposite if cond->negated is true
+    return met ^ cond->negated;
 }
 
 /* search_recursive:
@@ -1007,11 +1182,11 @@ static void search_recursive(const char* path, FindCommand* command, StringArray
         // Skip "." and  ".."
         if (folder_pointer(entry->d_name)) continue;
 
-        char fullpath[4096];
-        join_path(fullpath, sizeof(fullpath), path, entry->d_name);
+        char* fullpath = join_path(path, entry->d_name);
+        if (!fullpath) continue;
 
         struct stat st;
-        if (lstat(fullpath, &st) != 0) continue;
+        if (lstat(fullpath, &st) != 0) { free(fullpath); continue; }
 
         // Always recurse into subdirectories, regardless of the visibility filter,
         // so hidden files nested inside visible directories are still found.
@@ -1020,7 +1195,7 @@ static void search_recursive(const char* path, FindCommand* command, StringArray
 
         // Filter by visibility: skip hidden entries if only visible requested, and vice versa.
         bool is_hidden = entry->d_name[0] == '.';
-        if ((command->include_hidden && !is_hidden) || (command->include_visible && is_hidden)) continue;
+        if ((command->include_hidden && !is_hidden) || (command->include_visible && is_hidden)) { free(fullpath); continue; }
 
         // If the command has no conditions, it has automatically been met.
         bool condition_met = true;
@@ -1043,9 +1218,39 @@ static void search_recursive(const char* path, FindCommand* command, StringArray
                 (command->type == TYPE_ITEMS && (S_ISREG(st.st_mode) || S_ISDIR(st.st_mode))))
                 AddString(results, fullpath);
         }
+        free(fullpath);
     }
     closedir(dir);
 }
+
+// Root search command. Creates the StringArray object and calls the recursive searching.
+StringArray search(FindCommand* command) {
+    StringArray results = {
+        .items = NULL,
+        .count = 0,
+        .capacity = 0
+    };
+
+    StringArray searched = {
+        .items = NULL,
+        .count = 0,
+        .capacity = 0
+    };
+
+    for (size_t i = 0; i < command->paths.count; i++) {
+        if (!path_covered(&searched, command->paths.items[i])) {
+            AddString(&searched, command->paths.items[i]);
+            search_recursive(command->paths.items[i], command, &results);
+        }
+    }
+    FreeList(&searched);
+    dedupe_results(&results);
+    return results;
+}
+
+// ================================================================================================
+// Action Execution
+// ================================================================================================
 
 /* exec_action:
  *     - command: The command containing details and parameters for the action to execute.
@@ -1073,22 +1278,59 @@ static int exec_action(FindCommand* command, StringArray* results) {
             return EXIT_SUCCESS;
         }
 
+        // Parents first: a directory is handled before its descendants, and
+        // descendants of an already-handled directory are skipped (their
+        // contents moved/deleted with the parent; retrying would just noise).
+        qsort(results->items, results->count, sizeof(char*), cmp_path_len_lex);
+        StringArray done = {0};
+
         // Procedurally delete all files in list.
         for (size_t j = 0; j < results->count; j++) {
-            if (!delete(results->items[j]))
+            bool covered = false;
+            for (size_t k = 0; k < done.count; k++) {
+                if (path_within_lex(done.items[k], results->items[j])) { covered = true; break; }
+            }
+            if (covered) continue;
+            if (!delete(results->items[j])) {
+                if (errno == ENOENT) continue; // already gone with a parent: not an error
                 fprintf(stderr, "Failed to delete: %s\n", results->items[j]);
+            } 
+            else AddString(&done, results->items[j]);
         }
+        FreeList(&done);
         return EXIT_SUCCESS;
     }
 
     if (command->action == ACTION_MOVE || command->action == ACTION_COPY) {
-        // Make the target directory if it does not exist.
-        mkdir(command->action_value, 0755);
+
+        // Make the target directory if it does not exist (tolerate EEXIST).
+        if (mkdir(command->action_value, 0755) != 0 && errno != EEXIST) {
+            fprintf(stderr, "Could not make target directory for %s\n",
+                command->action == ACTION_MOVE ? "move" : "copy"
+            );
+            return EXIT_FAILURE;
+        }
+
+        // Parents-first sort
+        qsort(results->items, results->count, sizeof(char*), cmp_path_len_lex);
+        StringArray done = {0};
 
         for (size_t j = 0; j < results->count; j++) {
-            // Create destination file name.
-            char dest[4096];
-            join_path(dest, sizeof(dest), command->action_value, basename(results->items[j]));
+            bool covered = false;
+            for (size_t k = 0; k < done.count; k++) {
+                if (path_within_lex(done.items[k], results->items[j])) { covered = true; break; }
+            }
+            if (covered) continue;
+
+            // Create destination file name (exactly sized, no truncation).
+            char* dest = join_path(command->action_value, basename(results->items[j]));
+            if (!dest) {
+                fprintf(stderr, "Failed to %s: %s\n",
+                    command->action == ACTION_MOVE ? "move" : "copy",
+                    results->items[j]
+                );
+                continue;
+            }
 
             // Copy or move to destinatio depending on action.
             bool ok = command->action == ACTION_MOVE
@@ -1100,13 +1342,17 @@ static int exec_action(FindCommand* command, StringArray* results) {
                     command->action == ACTION_MOVE ? "move" : "copy",
                     results->items[j]
                 );
+            else AddString(&done, results->items[j]);
+            free(dest);
         }
+        FreeList(&done);
         return EXIT_SUCCESS;
     }
 
     // If the action is to run a custom command, execute the command template on each item,
     // substituting any {file} placeholders with the item's path.
     if (command->action == ACTION_COMMAND) {
+        int rc = EXIT_SUCCESS;
         for (size_t j = 0; j < results->count; j++) {
             // Get the filepath as a var to reduce complexity
             const char* filepath = results->items[j];
@@ -1115,28 +1361,26 @@ static int exec_action(FindCommand* command, StringArray* results) {
             char** args = malloc((command->command_template.count + 1) * sizeof(char*));
             if (!args) {
                 perror("malloc");
+                rc = EXIT_FAILURE;
                 continue;
             }
 
-            // Search for the file marker
+            // Expand every {file} marker in each token.
+            bool exp_ok = true;
             for (size_t k = 0; k < command->command_template.count; k++) {
-                const char* templ = command->command_template.items[k];
-                const char* marker = strstr(templ, "{file}");
-
-                // If marker not found, just copy the arg verbatim
-                if (!marker)
-                    args[k] = strdup(templ);
-                // If marker present, allocate string for marker replacement, then replace
-                else {
-                    size_t prefix_len = marker - templ;
-                    size_t suffix_len = strlen(marker + 6);
-                    size_t file_len = strlen(filepath);
-                    char* expanded = malloc(prefix_len + file_len + suffix_len + 1);
-                    memcpy(expanded, templ, prefix_len);
-                    memcpy(expanded + prefix_len, filepath, file_len);
-                    memcpy(expanded + prefix_len + file_len, marker + 6, suffix_len + 1);
-                    args[k] = expanded;
+                args[k] = expand_file_markers(command->command_template.items[k], filepath);
+                if (!args[k]) {
+                    perror("malloc");
+                    for (size_t m = 0; m < k; m++)
+                        free(args[m]);
+                    free(args);
+                    exp_ok = false;
+                    break;
                 }
+            }
+            if (!exp_ok) {
+                rc = EXIT_FAILURE;
+                continue;
             }
             args[command->command_template.count] = NULL;
 
@@ -1149,9 +1393,22 @@ static int exec_action(FindCommand* command, StringArray* results) {
             }
             else if (pid > 0) {
                 int status;
-                waitpid(pid, &status, 0);
+                if (waitpid(pid, &status, 0) < 0) {
+                    perror("waitpid");
+                    rc = EXIT_FAILURE;
+                } else if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+                    if (WIFEXITED(status))
+                        fprintf(stderr, "Command exited with status %d: %s\n",
+                            WEXITSTATUS(status), args[0]);
+                    else
+                        fprintf(stderr, "Command terminated abnormally: %s\n", args[0]);
+                    rc = EXIT_FAILURE;
+                }
             }
-            else perror("fork");
+            else {
+                perror("fork");
+                rc = EXIT_FAILURE;
+            }
 
             // Done! Free the template.
             for (size_t k = 0; k < command->command_template.count; k++)
@@ -1159,7 +1416,7 @@ static int exec_action(FindCommand* command, StringArray* results) {
 
             free(args);
         }
-        return EXIT_SUCCESS;
+        return rc;
     }
     return EXIT_SUCCESS;
 }
@@ -1255,6 +1512,8 @@ int help(int code) {
         case 10: return err("find: \"contents similar\" is only valid with type \"files\".\n");
         case 11: return err("find: \"hidden\" and \"visible\" cannot be used together (find searches both by default). \n");
         case 12: return err("find: Invalid time unit case. Use lowercase for seconds/minutes/hours (s, m, h) and uppercase for days/weeks/months/years (D, W, M, Y), e.g. 40s, 6m, 8h, 1D, 4W, 3M, 2Y.\n");
+        case 13: return err("find: Valid modifiers are \"hidden\", \"visible\", and \"shallow\".\n");
+        case 14: return err("find: Invalid characters after \"delete\".\n");
         default: return EXIT_FAILURE;
     }
 }
@@ -1331,7 +1590,7 @@ int main(int argc, char* argv[]) {
                     AddString(&command.paths, ".");
                     state = STATE_ACTION;
                 }
-                else return help(0);
+                else return help(13);
                 break;
             }
             /* STATE_PATHS:
@@ -1429,11 +1688,6 @@ int main(int argc, char* argv[]) {
                             if (++i >= argc || !str_equals(argv[i], "than")) return help(3);
                             cond_type = CONDITION_NEWERTHAN;
                         }
-                        // Comparative operators: "date > <date>" (newer), "date < <date>" (older)
-                        else if (str_equals(argv[i], ">"))
-                            cond_type = CONDITION_NEWERTHAN;
-                        else if (str_equals(argv[i], "<"))
-                            cond_type = CONDITION_OLDERTHAN;
                         else return help(4);
                     }
                     // Parse "size" conditions: lessthan, greaterthan (uses parse_bytes for units like "5mb").
@@ -1452,11 +1706,6 @@ int main(int argc, char* argv[]) {
                             if (++i >= argc || !str_equals(argv[i], "than")) return help(3);
                             cond_type = CONDITION_GREATERTHAN;
                         }
-                        // Comparative operators: "size < <size>" (less), "size > <size>" (greater)
-                        else if (str_equals(argv[i], "<"))
-                            cond_type = CONDITION_LESSTHAN;
-                        else if (str_equals(argv[i], ">"))
-                            cond_type = CONDITION_GREATERTHAN;
                         else return help(4);
                     }
                     // Parse "perms" conditions: exec (executable bit) or is (exact permission bits).
@@ -1606,7 +1855,12 @@ int main(int argc, char* argv[]) {
                         // Validate date values up front so the user gets one clear
                         // help message instead of a silent no-match (or per-file spam).
                         if (cond_type == CONDITION_OLDERTHAN || cond_type == CONDITION_NEWERTHAN) {
-                            if (parse_date(cond_value) == TIME_CANON_ERROR) return help(12);
+                            time_t cutoff = parse_date(cond_value);
+                            if (cutoff == (time_t)-2) return help(12);
+                            if (cutoff == (time_t)-1) return help(3);
+                        }
+                        if (cond_type == CONDITION_GREATERTHAN || cond_type == CONDITION_LESSTHAN) {
+                            if (parse_bytes(cond_value) < 0) return help(3);
                         }
                     }
 
@@ -1660,7 +1914,7 @@ int main(int argc, char* argv[]) {
                     command.action = ACTION_COPY;
                 else if (str_equals(argv[i], "delete")) {
                     command.action = ACTION_DELETE;
-                    if (++i != argc) return help(5);
+                    if (++i != argc) return help(14);
                     state = STATE_DONE;
                     break;
                 }
@@ -1699,5 +1953,6 @@ int main(int argc, char* argv[]) {
     FreeList(&results);
     FreeConditions(&command.conditions);
     FreeList(&command.command_template);
+    FreeList(&command.paths);
     return exit_code;
 }
