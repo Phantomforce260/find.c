@@ -112,9 +112,6 @@ describe 'find' do
         status
     end
 
-    # Opens the program with "r+" so the child always sees EOF (or `input`) on
-    # stdin. Without it, "then delete" blocks forever on its [y/N] prompt.
-    # stderr is dropped unless merge_stderr is set, so the suite output stays clean.
     def run_capture(args = "", input: nil, merge_stderr: false)
         command = "#{BIN} #{args}"
         command += merge_stderr ? " 2>&1" : " 2>/dev/null"
@@ -364,8 +361,8 @@ describe 'find' do
     end
 
     it 'rejects the operator form of the size condition' do
-        expect(run_script(%(files in #{TMP_DIR} where size ">" 100kb), merge_stderr: true))
-            .to include('find: unknown condition. Expected: name, size, date, perms, or contents.')
+        output = run_script(%(files in #{TMP_DIR} where size ">" 100kb), merge_stderr: true)
+        expect(output.join("\n")).to include('unknown condition. Expected: name, size, date, perms, or contents')
     end
 
     it 'accepts the separated "greater than" form of the size condition' do
@@ -378,14 +375,14 @@ describe 'find' do
     end
 
     it 'rejects an invalid size value' do
-        expect(run_script("files in #{TMP_DIR} where size greaterthan garbageXYZ", merge_stderr: true))
-            .to include('find: incomplete or missing condition after "where".')
+        output = run_script("files in #{TMP_DIR} where size greaterthan garbageXYZ", merge_stderr: true)
+        expect(output.join("\n")).to include('incomplete or missing condition after "where"')
         expect(run_status("files in #{TMP_DIR} where size greaterthan garbageXYZ")).to eq(1)
     end
 
     it 'rejects an invalid date value' do
-        expect(run_script("files in #{TMP_DIR} where date newerthan garbageXYZ", merge_stderr: true))
-            .to include('find: incomplete or missing condition after "where".')
+        output = run_script("files in #{TMP_DIR} where date newerthan garbageXYZ", merge_stderr: true)
+        expect(output.join("\n")).to include('incomplete or missing condition after "where"')
         expect(run_status("files in #{TMP_DIR} where date newerthan garbageXYZ")).to eq(1)
     end
 
@@ -419,8 +416,8 @@ describe 'find' do
     end
 
     it 'rejects the operator form of the date condition' do
-        expect(run_script(%(files in #{TMP_DIR} where date "<" 1D), merge_stderr: true))
-            .to include('find: unknown condition. Expected: name, size, date, perms, or contents.')
+        output = run_script(%(files in #{TMP_DIR} where date "<" 1D), merge_stderr: true)
+        expect(output.join("\n")).to include('unknown condition. Expected: name, size, date, perms, or contents')
     end
 
     it 'negates a date condition' do
@@ -517,68 +514,68 @@ describe 'find' do
     end
 
     it 'rejects a count condition on a file search' do
-        expect(run_script("files in #{TMP_DIR} where contents contains \">2\" files", merge_stderr: true))
-            .to include('find: expected "then", "and", or "or" after condition.')
+        output = run_script("files in #{TMP_DIR} where contents contains \">2\" files", merge_stderr: true)
+        expect(output.join("\n")).to include('expected "then", "and", or "or" after condition')
     end
 
     it 'rejects an unknown type' do
-        expect(run_script("bogus", merge_stderr: true))
-            .to include('find: <type> must be "files", "folders", or "items".')
+        output = run_script("bogus", merge_stderr: true)
+        expect(output.join("\n")).to include('<type> must be "files", "folders", or "items"')
     end
 
     it 'rejects "in" with no path' do
-        expect(run_script("files in", merge_stderr: true))
-            .to include('find: expected a path after "in".')
+        output = run_script("files in", merge_stderr: true)
+        expect(output.join("\n")).to include('expected a path after "in"')
     end
 
     it 'rejects a condition with no value' do
-        expect(run_script("files where name contains", merge_stderr: true))
-            .to include('find: incomplete or missing condition after "where".')
+        output = run_script("files where name contains", merge_stderr: true)
+        expect(output.join("\n")).to include('incomplete or missing condition after "where"')
     end
 
     it 'rejects a dangling "and"' do
-        expect(run_script("files where name contains a and", merge_stderr: true))
-            .to include('find: incomplete or missing condition after "where".')
+        output = run_script("files where name contains a and", merge_stderr: true)
+        expect(output.join("\n")).to include('incomplete or missing condition after "where"')
     end
 
     it 'rejects "then" with no action' do
-        expect(run_script("files then", merge_stderr: true))
-            .to include('find: expected an action: moveto, copyto, delete, or command.')
+        output = run_script("files then", merge_stderr: true)
+        expect(output.join("\n")).to include('expected an action: moveto, copyto, delete, or command')
     end
 
     it 'rejects an unknown action' do
-        expect(run_script("files then frobnicate", merge_stderr: true))
-            .to include('find: expected an action: moveto, copyto, delete, or command.')
+        output = run_script("files then frobnicate", merge_stderr: true)
+        expect(output.join("\n")).to include('expected an action: moveto, copyto, delete, or command')
     end
 
     it 'rejects copyto with no destination' do
-        expect(run_script("files where name contains a then copyto", merge_stderr: true))
-            .to include("find: incomplete action. moveto/copyto require a destination, command requires arguments.")
+        output = run_script("files where name contains a then copyto", merge_stderr: true)
+        expect(output.join("\n")).to include("incomplete action. moveto/copyto require a destination, command requires arguments")
     end
 
     it 'rejects extra arguments after an action' do
-        expect(run_script("files where name contains a then copyto #{TMP_DIR}/backup extra", merge_stderr: true))
-            .to include('find: Unexpected argument after action.')
+        output = run_script("files where name contains a then copyto #{TMP_DIR}/backup extra", merge_stderr: true)
+        expect(output.join("\n")).to include('Unexpected argument after action')
     end
 
     it 'rejects "contents contains" on an item search' do
-        expect(run_script("items where contents contains x", merge_stderr: true))
-            .to include('find: "contents contains" is not valid with type "items".')
+        output = run_script("items where contents contains x", merge_stderr: true)
+        expect(output.join("\n")).to include('"contents contains" is not valid with type "items"')
     end
 
     it 'rejects "contents similar" on a folder search' do
-        expect(run_script("folders where contents similar 50 to #{TMP_DIR}/main.c", merge_stderr: true))
-            .to include('find: "contents similar" is only valid with type "files".')
+        output = run_script("folders where contents similar 50 to #{TMP_DIR}/main.c", merge_stderr: true)
+        expect(output.join("\n")).to include('"contents similar" is only valid with type "files"')
     end
 
     it 'rejects hidden and visible together' do
-        expect(run_script("files hidden visible", merge_stderr: true).first)
-            .to start_with('find: "hidden" and "visible" cannot be used together')
+        output = run_script("files hidden visible", merge_stderr: true)
+        expect(output.join("\n")).to include('"hidden" and "visible" cannot be used together')
     end
 
     it 'rejects a lowercase time unit' do
-        expect(run_script("files where date olderthan 5y", merge_stderr: true).first)
-            .to start_with("find: Invalid time unit case.")
+        output = run_script("files where date olderthan 5y", merge_stderr: true)
+        expect(output.join("\n")).to include("Invalid time unit case")
     end
 
     it 'exits with a failure status when the arguments are invalid' do
@@ -663,13 +660,13 @@ describe 'find' do
     end
 
     it 'rejects an unknown condition keyword' do
-        expect(run_script("files in #{TMP_DIR} where bogus value", merge_stderr: true))
-            .to include('find: unknown condition. Expected: name, size, date, perms, or contents.')
+        output = run_script("files in #{TMP_DIR} where bogus value", merge_stderr: true)
+        expect(output.join("\n")).to include('unknown condition. Expected: name, size, date, perms, or contents')
     end
 
     it 'rejects an unknown condition keyword after a negation' do
-        expect(run_script("files in #{TMP_DIR} where not bogus value", merge_stderr: true))
-            .to include('find: unknown condition. Expected: name, size, date, perms, or contents.')
+        output = run_script("files in #{TMP_DIR} where not bogus value", merge_stderr: true)
+        expect(output.join("\n")).to include('unknown condition. Expected: name, size, date, perms, or contents')
     end
 
     it 'still finds files when a valid condition follows another' do

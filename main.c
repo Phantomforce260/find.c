@@ -1500,20 +1500,24 @@ int help(int code) {
                 "    find items in .. where date olderthan 08.27.26 or perms exec then delete"
             );
             return EXIT_SUCCESS;
-        case 1:  return err("find: <type> must be \"files\", \"folders\", or \"items\".\n");
-        case 2:  return err("find: expected a path after \"in\".\n");
-        case 3:  return err("find: incomplete or missing condition after \"where\".\n");
-        case 4:  return err("find: unknown condition. Expected: name, size, date, perms, or contents.\n");
-        case 5:  return err("find: expected \"then\", \"and\", or \"or\" after condition.\n");
-        case 6:  return err("find: expected an action: moveto, copyto, delete, or command.\n");
-        case 7:  return err("find: incomplete action. moveto/copyto require a destination, command requires arguments.\n");
-        case 8:  return err("find: Unexpected argument after action.\n");
-        case 9:  return err("find: \"contents contains\" is not valid with type \"items\".\n");
-        case 10: return err("find: \"contents similar\" is only valid with type \"files\".\n");
-        case 11: return err("find: \"hidden\" and \"visible\" cannot be used together (find searches both by default). \n");
-        case 12: return err("find: Invalid time unit case. Use lowercase for seconds/minutes/hours (s, m, h) and uppercase for days/weeks/months/years (D, W, M, Y), e.g. 40s, 6m, 8h, 1D, 4W, 3M, 2Y.\n");
-        case 13: return err("find: Valid modifiers are \"hidden\", \"visible\", and \"shallow\".\n");
-        case 14: return err("find: Invalid characters after \"delete\".\n");
+        case 1:  return err("find <type>:\n\n<type> must be \"files\", \"folders\", or \"items\".\n");
+        case 2:  return err("find <type> in <path>:\n\nexpected a path after \"in\".\n");
+        case 3:  return err("find <type> in <path> where <condition>:\n\nincomplete or missing condition after \"where\".\n");
+        case 4:  return err("find <type> where <condition>:\n\nunknown condition. Expected: name, size, date, perms, or contents.\n");
+        case 5:  return err("find <type> where <condition>:\n\nexpected \"then\", \"and\", or \"or\" after condition.\n");
+        case 6:  return err("find <type> then <action>:\n\nexpected an action: moveto, copyto, delete, or command.\n");
+        case 7:  return err("find <type> then <action>:\n\nincomplete action. moveto/copyto require a destination, command requires arguments.\n");
+        case 8:  return err("find <type> then <action>:\n\nUnexpected argument after action.\n");
+        case 9:  return err("find <type> where contents contains:\n\n\"contents contains\" is not valid with type \"items\".\n");
+        case 10: return err("find <type> where contents similar:\n\n\"contents similar\" is only valid with type \"files\".\n");
+        case 11: return err("find <type> [hidden|visible]:\n\n\"hidden\" and \"visible\" cannot be used together (find searches both by default).\n");
+        case 12: return err("find <type> where date:\n\nInvalid time unit case. Use lowercase for seconds/minutes/hours (s, m, h) and uppercase for days/weeks/months/years (D, W, M, Y), e.g. 40s, 6m, 8h, 1D, 4W, 3M, 2Y.\n");
+        case 13: return err("find <type> [shallow] [hidden|visible]:\n\nValid modifiers are \"hidden\", \"visible\", and \"shallow\".\n");
+        case 14: return err("find <type> then delete:\n\nInvalid characters after \"delete\".\n");
+        case 15: return err("find <type> then <action>:\n\n\"copyto\" and \"moveto\" can be separate words, but \"to\" was missing.\n");
+        case 16: return err("find <type> where <condition>:\n\n\"startswith\" and \"endswith\" can be separate words, but \"with\" was missing.\n");
+        case 17: return err("find <type> where <condition>:\n\n\"greaterthan\" and \"lessthan\" can be separate words, but \"than\" was missing.\n");
+        case 18: return err("find <type> where <condition>:\n\n\"olderthan\" and \"newerthan\" can be separate words, but \"than\" was missing.\n");
         default: return EXIT_FAILURE;
     }
 }
@@ -1659,16 +1663,14 @@ int main(int argc, char* argv[]) {
                             cond_type = CONDITION_ENDSWITH;
                         else if (str_equals(argv[i], "ends")) {
                             // Separated words: "ends with <str>"
-                            if (++i >= argc || !str_equals(argv[i], "with"))
-                                return help(3);
+                            if (++i >= argc || !str_equals(argv[i], "with")) return help(16);
                             cond_type = CONDITION_ENDSWITH;
                         }
                         else if (str_equals(argv[i], "startswith"))
                             cond_type = CONDITION_STARTSWITH;
                         else if (str_equals(argv[i], "starts")) {
                             // Separated words: "starts with <str>"
-                            if (++i >= argc || !str_equals(argv[i], "with"))
-                                return help(3);
+                            if (++i >= argc || !str_equals(argv[i], "with")) return help(16);
                             cond_type = CONDITION_STARTSWITH;
                         }
                         else return help(4);
@@ -1681,11 +1683,11 @@ int main(int argc, char* argv[]) {
                             cond_type = CONDITION_NEWERTHAN;
                         // Separated words: "older than <date>", "newer than <date>"
                         else if (str_equals(argv[i], "older")) {
-                            if (++i >= argc || !str_equals(argv[i], "than")) return help(3);
+                            if (++i >= argc || !str_equals(argv[i], "than")) return help(18);
                             cond_type = CONDITION_OLDERTHAN;
                         }
                         else if (str_equals(argv[i], "newer")) {
-                            if (++i >= argc || !str_equals(argv[i], "than")) return help(3);
+                            if (++i >= argc || !str_equals(argv[i], "than")) return help(18);
                             cond_type = CONDITION_NEWERTHAN;
                         }
                         else return help(4);
@@ -1699,11 +1701,11 @@ int main(int argc, char* argv[]) {
                             cond_type = CONDITION_GREATERTHAN;
                         // Separated words: "less than <size>", "greater than <size>"
                         else if (str_equals(argv[i], "less")) {
-                            if (++i >= argc || !str_equals(argv[i], "than")) return help(3);
+                            if (++i >= argc || !str_equals(argv[i], "than")) return help(17);
                             cond_type = CONDITION_LESSTHAN;
                         }
                         else if (str_equals(argv[i], "greater")) {
-                            if (++i >= argc || !str_equals(argv[i], "than")) return help(3);
+                            if (++i >= argc || !str_equals(argv[i], "than")) return help(17);
                             cond_type = CONDITION_GREATERTHAN;
                         }
                         else return help(4);
@@ -1912,6 +1914,14 @@ int main(int argc, char* argv[]) {
                     command.action = ACTION_MOVE;
                 else if (str_equals(argv[i], "copyto"))
                     command.action = ACTION_COPY;
+                else if (str_equals(argv[i], "move")) {
+                    if (++i >= argc || !str_equals(argv[i], "to")) return help(15);
+                    command.action = ACTION_MOVE;
+                }
+                else if (str_equals(argv[i], "copy")) {
+                    if (++i >= argc || !str_equals(argv[i], "to")) return help(15);
+                    command.action = ACTION_COPY;
+                }
                 else if (str_equals(argv[i], "delete")) {
                     command.action = ACTION_DELETE;
                     if (++i != argc) return help(14);
