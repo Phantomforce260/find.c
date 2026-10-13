@@ -252,20 +252,20 @@ void FreeConditions(ConditionArray* array) {
  * If the path is a file, returns the size of the file.
  * If the path is a folder, recurses through the folder and returns the size of all nested files.
  * Special files are not counted. */
-static long long byte_count(const char* path) {
+static int64_t byte_count(const char* path) {
     struct stat st;
     // Check if file exists
     if (lstat(path, &st) != 0) return -1;
 
     // If file, return file size
-    if (S_ISREG(st.st_mode)) return (long long)st.st_size;
+    if (S_ISREG(st.st_mode)) return (int64_t)st.st_size;
 
     // If directory, open and search contents
     if (S_ISDIR(st.st_mode)) {
         DIR* dir = opendir(path);
         if (!dir) return -1;
 
-        long long total = 0;
+        int64_t total = 0;
         struct dirent* entry;
 
         // Sum each item in the folder, excluding "." and ".."
@@ -279,7 +279,7 @@ static long long byte_count(const char* path) {
             }
 
             // Recursively search each item
-            long long size = byte_count(child_path);
+            int64_t size = byte_count(child_path);
             free(child_path);
 
             if (size < 0) {
@@ -298,11 +298,11 @@ static long long byte_count(const char* path) {
 /* parse_bytes:
  *     - str: A string representing a size in bytes ("1GB", "50MB")
  *
- * Takes a string representing a metric byte count and returns the number of bytes as a long. */
-static long long parse_bytes(const char* str) {
+ * Takes a string representing a metric byte count and returns the number of bytes as an int64_t. */
+static int64_t parse_bytes(const char* str) {
     char* end;
     double value;
-    long long multiplier = 1;
+    int64_t multiplier = 1;
 
     // Parse numbers
     value = strtod(str, &end);
@@ -311,36 +311,36 @@ static long long parse_bytes(const char* str) {
     if (end == str) return -1;
 
     // Skip whitespace between number and unit
-    while (isspace((unsigned char)* end))
+    while (isspace((uint8_t)* end))
         end++;
 
     char unit[3] = {0};
     int i = 0;
 
     while (*end && i < 2) {
-        unit[i++] = (char)tolower((unsigned char)* end);
+        unit[i++] = (char)tolower((uint8_t)* end);
         end++;
     }
 
     // Make sure there is nothing after the unit
-    while (isspace((unsigned char)* end)) end++;
+    while (isspace((uint8_t)* end)) end++;
 
     if (*end != '\0') return -1;
 
     if (str_equals(unit, "b") || unit[0] == '\0')
         multiplier = 1;
     else if (str_equals(unit, "kb"))
-        multiplier = 1024LL;
+        multiplier = INT64_C(1024);
     else if (str_equals(unit, "mb"))
-        multiplier = 1024LL * 1024;
+        multiplier = INT64_C(1024) * 1024;
     else if (str_equals(unit, "gb"))
-        multiplier = 1024LL * 1024 * 1024;
+        multiplier = INT64_C(1024) * 1024 * 1024;
     else if (str_equals(unit, "tb"))
-        multiplier = 1024LL * 1024 * 1024 * 1024;
+        multiplier = INT64_C(1024) * 1024 * 1024 * 1024;
     // Unknown unit
     else return -1;
 
-    return (long long)(value * multiplier);
+    return (int64_t)(value * multiplier);
 }
 
 // is_executable: returns true if a path is executable (+x bit)
@@ -456,7 +456,7 @@ static double parse_similarity(const char* str) {
  *     - out_size: Output parameter set to the number of bytes read.
  *
  * Reads an entire file into a malloc'd buffer. Returns NULL on failure. */
-static unsigned char* read_file_bytes(const char* path, size_t* out_size) {
+static uint8_t* read_file_bytes(const char* path, size_t* out_size) {
     FILE* f = fopen(path, "rb");
     if (!f) return NULL;
 
@@ -469,7 +469,7 @@ static unsigned char* read_file_bytes(const char* path, size_t* out_size) {
         return NULL;
     }
 
-    unsigned char* buf = malloc(file_size);
+    uint8_t* buf = malloc(file_size);
     if (!buf) {
         fclose(f);
         return NULL;
@@ -491,8 +491,8 @@ static unsigned char* read_file_bytes(const char* path, size_t* out_size) {
  * in the longer file count as mismatches. Returns -1.0 on read error. */
 static double file_similarity(const char* path1, const char* path2) {
     size_t size1, size2;
-    unsigned char* buf1 = read_file_bytes(path1, &size1);
-    unsigned char* buf2 = read_file_bytes(path2, &size2);
+    uint8_t* buf1 = read_file_bytes(path1, &size1);
+    uint8_t* buf2 = read_file_bytes(path2, &size2);
 
     if (!buf1 || !buf2) {
         free(buf1);
@@ -852,7 +852,7 @@ static time_t parse_date(const char* str) {
     double value = strtod(str, &end);
     if (end == str) return (time_t)-1;
 
-    while (isspace((unsigned char)*end))
+    while (isspace((uint8_t)*end))
         end++;
 
     char unit = *end;
@@ -890,7 +890,7 @@ static time_t parse_date(const char* str) {
     }
 
     do end++; 
-    while (isspace((unsigned char)*end));
+    while (isspace((uint8_t)*end));
 
     if (*end != '\0') return (time_t)-1;
     return now - (time_t)(value * multiplier);
@@ -1138,8 +1138,8 @@ static bool eval_condition(const char* fullpath, const char* name, const Conditi
             met = (cond->type == CONDITION_OLDERTHAN) ? st.st_mtime < cutoff : st.st_mtime > cutoff; break;
         }
         case CONDITION_GREATERTHAN: case CONDITION_LESSTHAN: {
-            long long nbytes = byte_count(fullpath);
-            long long parsed = parse_bytes(cond->value);
+            int64_t nbytes = byte_count(fullpath);
+            int64_t parsed = parse_bytes(cond->value);
             met = nbytes >= 0 && parsed >= 0 &&
                 (cond->type == CONDITION_GREATERTHAN ? nbytes > parsed : nbytes < parsed); break;
         }
