@@ -1,5 +1,6 @@
 # Binary name
 find
-cfind
+query
+searchfor
 
 .ruby-lsp

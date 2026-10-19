@@ -1,11 +1,13 @@
 Compile with:
 
 ```bash
-gcc main.c -o find
+gcc main.c -o query
 ```
+
+*To avoid conflicting with the default ``find`` command, consider using an alternate name like ``query`` or ``searchfor``.*
 
 Run:
 
 ```bash
-find <type> [shallow] [in <paths>] [where <conditions>] [then <action>]
+query <type> [shallow] [hidden|visible] [in <paths>] [where <conditions>] [then <action>]
 ```

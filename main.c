@@ -19,6 +19,12 @@
 #include <time.h>
 
 // ================================================================================================
+// Constants
+// ================================================================================================
+
+static const char* prog_name = "find";
+
+// ================================================================================================
 // Enums
 // ================================================================================================
 
@@ -112,28 +118,62 @@ typedef struct {
 // ================================================================================================
 
 // str_equals: returns true if str1 == str2.
-bool str_equals(const char* str1, const char* str2) {
+static bool str_equals(const char* str1, const char* str2) {
     return strcmp(str1, str2) == 0;
 }
 
 // startswith: returns true if str starts with prefix.
-bool startswith(const char *str, const char *prefix) {
+static bool startswith(const char *str, const char *prefix) {
     return strncmp(str, prefix, strlen(prefix)) == 0;
 }
 
 // endswith: returns true if str ends with suffix.
-bool endswith(const char *str, const char *suffix) {
+static bool endswith(const char *str, const char *suffix) {
     const size_t str_len = strlen(str);
     const size_t suffix_len = strlen(suffix);
     return (suffix_len <= str_len) && str_equals(str + str_len - suffix_len, suffix);
 }
 
-bool folder_pointer(const char* str) {
+static char* replace(const char* str, const char* a, const char* b) {
+    if (*a == '\0') return NULL;
+
+    size_t count = 0;
+    size_t len_a = strlen(a);
+    size_t len_b = strlen(b);
+
+    const char* p = str;
+    while ((p = strstr(p, a)) != NULL) {
+        count++;
+        p += len_a;
+    }
+
+    size_t new_len = strlen(str) + count * (len_b - len_a);
+    char* result = malloc(new_len + 1);
+    if (!result) return NULL;
+
+    const char* src = str;
+    char* dst = result;
+
+    while((p = strstr(src, a)) != NULL) {
+        size_t len = (size_t)(p - src);
+        memcpy(dst, src, len);
+        dst += len;
+
+        memcpy(dst, b, len_b);
+        dst += len_b;
+
+        src = p + len_a;
+    }
+    strcpy(dst, src);
+    return result;
+}
+
+static bool folder_pointer(const char* str) {
     return str_equals(str, ".") || str_equals(str, "..");
 }
 
 // basename: returns the name of the file/folder with the parent path stripped out.
-const char* basename(const char* path) {
+static const char* basename(const char* path) {
     const char* last = strrchr(path, '/');
     return last ? last + 1 : path;
 }
@@ -146,7 +186,7 @@ const char* basename(const char* path) {
  * was given with a trailing slash does not produce a doubled separator.
  * Returns a malloc'd string of exactly the necessary size that the caller must
  * free, or NULL on allocation failure (or size overflow). */
-char* join_path(const char* dir, const char* name) {
+static char* join_path(const char* dir, const char* name) {
     size_t len = strlen(dir);
 
     // Keep the root "/" intact, but drop any other trailing separators.
@@ -172,7 +212,7 @@ char* join_path(const char* dir, const char* name) {
 
 // AddString: Adds a string to a StringArray struct.
 // Note: Memory errors terminate the program.
-void AddString(StringArray* array, const char* string) {
+static void AddString(StringArray* array, const char* string) {
 
     if (array->count == array->capacity) {
         size_t new_capacity = array->capacity == 0 ? 16 : array->capacity * 2;
@@ -195,7 +235,7 @@ void AddString(StringArray* array, const char* string) {
 }
 
 // FreeList: Frees a StringArray.
-void FreeList(StringArray* array) {
+static void FreeList(StringArray* array) {
     for (size_t i = 0; i < array->count; i++)
         free(array->items[i]);
 
@@ -207,7 +247,7 @@ void FreeList(StringArray* array) {
 
 // AddCondition: Adds a Condition to a ConditionArray struct.
 // Note: Memory errors terminate the program.
-void AddCondition(ConditionArray* array, Condition cond) {
+static void AddCondition(ConditionArray* array, Condition cond) {
     if (array->count == array->capacity) {
         size_t new_capacity = array->capacity == 0 ? 16 : array->capacity * 2;
         Condition* new_items = realloc(array->items, new_capacity * sizeof(Condition));
@@ -230,7 +270,7 @@ void AddCondition(ConditionArray* array, Condition cond) {
 }
 
 // FreeList: Frees a ConditionArray.
-void FreeConditions(ConditionArray* array) {
+static void FreeConditions(ConditionArray* array) {
     for (size_t i = 0; i < array->count; i++) {
         free(array->items[i].value);
         free(array->items[i].reference_file);
@@ -1426,18 +1466,20 @@ static int exec_action(FindCommand* command, StringArray* results) {
 // ================================================================================================
 
 int err(const char* msg) {
-    fputs(msg, stderr);
+    char* new_msg = replace(msg, "@prog@", prog_name);
+    fputs(new_msg, stderr);
+    free(new_msg);
     return EXIT_FAILURE;
 }
 
 int help(int code) {
     switch (code) {
-        case 0:
-            puts(
+        case 0: {
+            char* synopsis = replace(
                 "find.c - Find and operate on files with readable syntax.\n\n"
 
                 "SYNOPSIS\n"
-                "    find <type> [shallow] [visible|hidden] [in <paths>] [where <conditions>] [then <action>]\n\n"
+                "    @prog@ <type> [shallow] [visible|hidden] [in <paths>] [where <conditions>] [then <action>]\n\n"
 
                 "TYPES\n"
                 "    files       Search for files\n"
@@ -1486,38 +1528,41 @@ int help(int code) {
                 "    command <args>            Run command for each match ({file} expands to path)\n\n"
 
                 "EXAMPLES\n"
-                "    find files in /home\n"
-                "    find files shallow in .\n"
-                "    find files where name contains .c and perms is 644\n"
-                "    find files where not name endswith .o\n"
-                "    find files where name contains .h then copyto backup/\n"
-                "    find folders hidden in ./cache where perms is 775 then delete"
-                "    find files in src where contents contains TODO then command grep -n {file}\n"
-                "    find files where contents similar 98 to main.c\n"
-                "    find files where contents 0.98 similar to main.c\n"
-                "    find files visible where name endswith .c or name endswith .h\n"
-                "    find files where not name contains .o and name contains main\n"
-                "    find items in .. where date olderthan 08.27.26 or perms exec then delete"
-            );
+                "    @prog@ files in /home\n"
+                "    @prog@ files shallow in .\n"
+                "    @prog@ files where name contains .c and perms is 644\n"
+                "    @prog@ files where not name endswith .o\n"
+                "    @prog@ files where name contains .h then copyto backup/\n"
+                "    @prog@ folders hidden in ./cache where perms is 775 then delete"
+                "    @prog@ files in src where contents contains TODO then command grep -n {file}\n"
+                "    @prog@ files where contents similar 98 to main.c\n"
+                "    @prog@ files where contents 0.98 similar to main.c\n"
+                "    @prog@ files visible where name endswith .c or name endswith .h\n"
+                "    @prog@ files where not name contains .o and name contains main\n"
+                "    @prog@ items in .. where date olderthan 08.27.26 or perms exec then delete",
+            "@prog@", prog_name);
+            puts(synopsis);
+            free(synopsis);
             return EXIT_SUCCESS;
-        case 1:  return err("find <type>:\n\n<type> must be \"files\", \"folders\", or \"items\".\n");
-        case 2:  return err("find <type> in <path>:\n\nexpected a path after \"in\".\n");
-        case 3:  return err("find <type> in <path> where <condition>:\n\nincomplete or missing condition after \"where\".\n");
-        case 4:  return err("find <type> where <condition>:\n\nunknown condition. Expected: name, size, date, perms, or contents.\n");
-        case 5:  return err("find <type> where <condition>:\n\nexpected \"then\", \"and\", or \"or\" after condition.\n");
-        case 6:  return err("find <type> then <action>:\n\nexpected an action: moveto, copyto, delete, or command.\n");
-        case 7:  return err("find <type> then <action>:\n\nincomplete action. moveto/copyto require a destination, command requires arguments.\n");
-        case 8:  return err("find <type> then <action>:\n\nUnexpected argument after action.\n");
-        case 9:  return err("find <type> where contents contains:\n\n\"contents contains\" is not valid with type \"items\".\n");
-        case 10: return err("find <type> where contents similar:\n\n\"contents similar\" is only valid with type \"files\".\n");
-        case 11: return err("find <type> [hidden|visible]:\n\n\"hidden\" and \"visible\" cannot be used together (find searches both by default).\n");
-        case 12: return err("find <type> where date:\n\nInvalid time unit case. Use lowercase for seconds/minutes/hours (s, m, h) and uppercase for days/weeks/months/years (D, W, M, Y), e.g. 40s, 6m, 8h, 1D, 4W, 3M, 2Y.\n");
-        case 13: return err("find <type> [shallow] [hidden|visible]:\n\nValid modifiers are \"hidden\", \"visible\", and \"shallow\".\n");
-        case 14: return err("find <type> then delete:\n\nInvalid characters after \"delete\".\n");
-        case 15: return err("find <type> then <action>:\n\n\"copyto\" and \"moveto\" can be separate words, but \"to\" was missing.\n");
-        case 16: return err("find <type> where <condition>:\n\n\"startswith\" and \"endswith\" can be separate words, but \"with\" was missing.\n");
-        case 17: return err("find <type> where <condition>:\n\n\"greaterthan\" and \"lessthan\" can be separate words, but \"than\" was missing.\n");
-        case 18: return err("find <type> where <condition>:\n\n\"olderthan\" and \"newerthan\" can be separate words, but \"than\" was missing.\n");
+        }
+        case 1:  return err("@prog@ <type>:\n\n<type> must be \"files\", \"folders\", or \"items\".\n");
+        case 2:  return err("@prog@ <type> in <path>:\n\nexpected a path after \"in\".\n");
+        case 3:  return err("@prog@ <type> in <path> where <condition>:\n\nincomplete or missing condition after \"where\".\n");
+        case 4:  return err("@prog@ <type> where <condition>:\n\nunknown condition. Expected: name, size, date, perms, or contents.\n");
+        case 5:  return err("@prog@ <type> where <condition>:\n\nexpected \"then\", \"and\", or \"or\" after condition.\n");
+        case 6:  return err("@prog@ <type> then <action>:\n\nexpected an action: moveto, copyto, delete, or command.\n");
+        case 7:  return err("@prog@ <type> then <action>:\n\nincomplete action. moveto/copyto require a destination, command requires arguments.\n");
+        case 8:  return err("@prog@ <type> then <action>:\n\nUnexpected argument after action.\n");
+        case 9:  return err("@prog@ <type> where contents contains:\n\n\"contents contains\" is not valid with type \"items\".\n");
+        case 10: return err("@prog@ <type> where contents similar:\n\n\"contents similar\" is only valid with type \"files\".\n");
+        case 11: return err("@prog@ <type> [hidden|visible]:\n\n\"hidden\" and \"visible\" cannot be used together (find searches both by default).\n");
+        case 12: return err("@prog@ <type> where date:\n\nInvalid time unit case. Use lowercase for seconds/minutes/hours (s, m, h) and uppercase for days/weeks/months/years (D, W, M, Y), e.g. 40s, 6m, 8h, 1D, 4W, 3M, 2Y.\n");
+        case 13: return err("@prog@ <type> [shallow] [hidden|visible]:\n\nValid modifiers are \"hidden\", \"visible\", and \"shallow\".\n");
+        case 14: return err("@prog@ <type> then delete:\n\nInvalid characters after \"delete\".\n");
+        case 15: return err("@prog@ <type> then <action>:\n\n\"copyto\" and \"moveto\" can be separate words, but \"to\" was missing.\n");
+        case 16: return err("@prog@ <type> where <condition>:\n\n\"startswith\" and \"endswith\" can be separate words, but \"with\" was missing.\n");
+        case 17: return err("@prog@ <type> where <condition>:\n\n\"greaterthan\" and \"lessthan\" can be separate words, but \"than\" was missing.\n");
+        case 18: return err("@prog@ <type> where <condition>:\n\n\"olderthan\" and \"newerthan\" can be separate words, but \"than\" was missing.\n");
         default: return EXIT_FAILURE;
     }
 }
@@ -1532,6 +1577,7 @@ int help(int code) {
  * Once parsing is complete, the search is executed and the action is performed on the results. */
 int main(int argc, char* argv[]) {
 
+    prog_name = basename(argv[0]);
     // If only binary name passed, display help.
     if (argc == 1) return help(0);
 
